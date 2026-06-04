@@ -24,10 +24,27 @@
         "hint": "用于将 GitHub 动态的时间转换为本地时间"
     },
     "username_qq": {
+        "type": "template_list",
         "description": "GitHub 用户名与 QQ 号映射",
-        "type": "object",
-        "default": {},
-        "hint": "用于将 GitHub 动态中的用户名与 QQ 号对应，可以使用 at 消息来通知。"
+        "templates": {
+            "mapping_item": {
+                "name": "添加映射关系",
+                "hint": "增加一个 GitHub 用户名与 QQ 号的绑定",
+                "items": {
+                    "name": {
+                        "description": "GitHub 用户名",
+                        "type": "string",
+                        "default": ""
+                    },
+                    "qq": {
+                        "description": "QQ 号",
+                        "type": "string",
+                        "default": ""
+                    }
+                }
+            }
+        },
+        "hint": "用于将 GitHub 动态中的用户名与 QQ 号对应，例如 Kingcq 对应 404291187"
     },
     "whitelist": {
         "description": "白名单用户",

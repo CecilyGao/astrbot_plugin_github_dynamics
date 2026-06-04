@@ -74,6 +74,10 @@ class GitHubPrivateListenPlugin(Star):
         self.cfg_timezone: str = config.get("timezone", "Asia/Shanghai")
         self.whitelist: List[str] = config.get("whitelist", [])
 
+        # 用户名 -> QQ 映射（管理员在配置中设置 username_qq）
+        # 支持键为 github login 或 display name，值为 QQ 字符串或数字
+        self.username_qq_map: Dict[str, str] = self._load_username_qq_map()
+
         # 数据目录
         self.data_dir = StarTools.get_data_dir("astrbot_plugin_private_github")
         os.makedirs(self.data_dir, exist_ok=True)
@@ -131,7 +135,7 @@ class GitHubPrivateListenPlugin(Star):
         """生成 KV 中游标的唯一 key"""
         if sub["type"] == "repo":
             return f"{KV_LAST_CURSOR_PREFIX}{session}_{sub['repo']}_{sub['event']}"
-        else:  # project
+        else:
             return f"{KV_LAST_CURSOR_PREFIX}{session}_project_{sub['org']}_{sub['number']}"
 
     async def _get_cursor(self, session: str, sub: Dict) -> str:
@@ -225,6 +229,77 @@ class GitHubPrivateListenPlugin(Star):
         except Exception:
             return time_str
 
+    def _load_username_qq_map(self) -> Dict[str, str]:
+        raw = []
+        try:
+            raw = self.config.get("username_qq", []) or []
+        except Exception:
+            raw = []
+
+        mapping: Dict[str, str] = {}
+
+        def store(key_raw: Any, qq_raw: Any):
+            try:
+                key = str(key_raw).strip().lstrip("@").lower()
+                if not key:
+                    return
+            except Exception:
+                return
+            try:
+                qq_str = str(qq_raw).strip()
+            except Exception:
+                return
+            import re
+
+            digits = re.sub(r"\D+", "", qq_str)
+            if not digits:
+                logger.warning(f"[Private GitHub] username_qq: QQ for '{key}' is invalid or contains no digits: '{qq_str}' - skipped")
+                return
+            if digits != qq_str:
+                logger.warning(f"[Private GitHub] username_qq: QQ '{qq_str}' for '{key}' contained non-digits; using '{digits}'")
+            mapping[key] = digits
+
+        if isinstance(raw, dict):
+            for k, v in raw.items():
+                store(k, v)
+            return mapping
+
+        if isinstance(raw, list):
+            for item in raw:
+                if isinstance(item, dict):
+                    username = item.get("username") or item.get("login") or item.get("name") or item.get("user")
+                    qq = item.get("qq") or item.get("QQ") or item.get("q")
+                    if username and qq is not None:
+                        store(username, qq)
+                        continue
+                elif isinstance(item, str):
+                    s = item.strip()
+                    if ":" in s:
+                        a, b = s.split(":", 1)
+                        store(a, b)
+            return mapping
+
+        return mapping
+
+    def _resolve_qq_for_username(self, username: str) -> Optional[str]:
+        if not username:
+            return None
+        key = str(username).strip().lstrip("@").lower()
+        return self.username_qq_map.get(key)
+
+    def _collect_assignees_from_entries(self, entries: List[Dict]) -> List[str]:
+        s = []
+        seen = set()
+        for e in entries:
+            for a in e.get("assignees", []) or []:
+                if not a:
+                    continue
+                if a in seen:
+                    continue
+                seen.add(a)
+                s.append(a)
+        return s
+
     def _normalize_user_display(self, user_obj: Dict[str, Any]) -> str:
         """优先返回用户的 name（非空且不为字符串 'None'），否则回退到 login。"""
         if not user_obj:
@@ -238,10 +313,15 @@ class GitHubPrivateListenPlugin(Star):
         return ""
 
     def _extract_assignee_logins(self, assignees_field: Any) -> List[str]:
-        """从 GraphQL/REST 的 assignees 字段中提取优先的 login，如果 login 缺失则退回到可用的 name。"""
+        """从 GraphQL/REST 的 assignees 字段中提取用户显示名或登录名。
+
+        优先使用 `name`（非空且不为字符串 'None'），否则回退到 `login`。
+        返回值为字符串列表，方便用于消息展示与 QQ 映射查找。
+        """
         nodes = []
         if not assignees_field:
             return []
+        # 支持两种常见结构：{ 'nodes': [...] } 或直接为列表
         if isinstance(assignees_field, dict):
             nodes = assignees_field.get("nodes", [])
         elif isinstance(assignees_field, list):
@@ -253,12 +333,12 @@ class GitHubPrivateListenPlugin(Star):
         for u in nodes:
             if not isinstance(u, dict):
                 continue
-            login = u.get("login")
             name = u.get("name")
-            if login:
-                res.append(login)
-            elif isinstance(name, str) and name.strip() and name.strip().lower() != "none":
+            login = u.get("login")
+            if isinstance(name, str) and name.strip() and name.strip().lower() != "none":
                 res.append(name.strip())
+            elif login:
+                res.append(login)
         return res
 
     @staticmethod
@@ -566,26 +646,10 @@ class GitHubPrivateListenPlugin(Star):
             item_type = "Draft Issue"
             number_str = ""
 
-        parts = []
-        if author_display:
-            parts.append(f"作者: @{author_display}")
-        if assignees:
-            parts.append("Assignees: " + ", ".join([f"@{a}" for a in assignees]))
-        if state:
-            parts.append(f"状态: {state}")
-        if merged:
-            parts.append("已合并")
-        if latest_comment:
-            snippet = latest_comment.get("body", "").replace("\n", " ")[:200]
-            parts.append(f"最近评论 @{latest_comment.get('author','')}: {snippet}")
-
-        content_summary = "\n".join(parts)
-
         return {
             "title": f"[Project {org}/{number}] {item_type} {number_str}: {title}",
             "link": url,
             "published": self._convert_time(item.get("updatedAt", item.get("createdAt", ""))),
-            "content": content_summary,
             "id": item.get("id", ""),
             "type": "project_item",
             "author": author_display,
@@ -613,7 +677,7 @@ class GitHubPrivateListenPlugin(Star):
         if not self.github_token:
             return
 
-        messages_by_session: Dict[str, List[str]] = {}
+        messages_by_session: Dict[str, List[Tuple[str, List[str]]]] = {}
 
         for session, items in list(self.subscriptions.items()):
             for sub in items:
@@ -640,7 +704,8 @@ class GitHubPrivateListenPlugin(Star):
                         else:
                             msg = self._format_project_entries(f"{sub['org']}/{sub['number']}", new_entries)
                         if msg:
-                            messages_by_session.setdefault(session, []).append(msg)
+                            assignees = self._collect_assignees_from_entries(new_entries)
+                            messages_by_session.setdefault(session, []).append((msg, assignees))
 
                     if new_cursor and new_cursor != last_cursor:
                         await self._set_cursor(session, sub, new_cursor)
@@ -648,9 +713,23 @@ class GitHubPrivateListenPlugin(Star):
                     logger.error(f"[Private GitHub] 处理订阅 {sub} 失败: {e}")
 
         for session, msg_list in messages_by_session.items():
-            full_msg = "\n\n".join(msg_list)
+            full_msg = "\n\n".join([m[0] for m in msg_list])
             chain = MessageChain().message(full_msg)
             logger.info(f"[Private GitHub] 推送到 {session}: {full_msg}")
+            seen = set()
+            for _, ass in msg_list:
+                for a in ass or []:
+                    if not a:
+                        continue
+                    if a in seen:
+                        continue
+                    seen.add(a)
+                    qq = self._resolve_qq_for_username(a)
+                    if qq:
+                        try:
+                            chain.at(a, qq)
+                        except Exception:
+                            pass
             try:
                 await self.context.send_message(session, chain)
             except Exception as e:
@@ -677,8 +756,8 @@ class GitHubPrivateListenPlugin(Star):
                 ass = entry.get("assignees") or []
                 if ass:
                     lines.append("     🔔 指派: " + " ".join([f"@{a}" for a in ass]))
-            if entry.get("content"):
-                lines.append(f"     📝 {entry.get('content')}")
+            if entry.get("state"):
+                lines.append(f"     📌 状态: {entry.get('state')}")
             if entry.get("link"):
                 lines.append(f"     🔗 {entry.get('link')}")
             lines.append("")
@@ -691,20 +770,18 @@ class GitHubPrivateListenPlugin(Star):
             lines.append(f"  {i}. {entry.get('title')}")
             if entry.get("published"):
                 lines.append(f"     🕐 {entry.get('published')}")
-            # 作者与指派者（从 _build_project_entry_dict 填充）
             if entry.get("author"):
                 lines.append(f"     🙋 提出者: @{entry.get('author')}")
             if entry.get("assignees"):
                 ass = entry.get("assignees") or []
                 if ass:
                     lines.append("     🔔 指派: " + " ".join([f"@{a}" for a in ass]))
-            # 最近评论
             if entry.get("latest_comment"):
                 lc = entry.get("latest_comment")
                 snippet = (lc.get("body", "") or "").replace("\n", " ")[:300]
                 lines.append(f"     💬 最近评论 @{lc.get('author','')}: {snippet} [{lc.get('createdAt','')}]")
-            if entry.get("content"):
-                lines.append(f"     📝 {entry.get('content')}")
+            if entry.get("state"):
+                lines.append(f"     📌 状态: {entry.get('state')}")
             if entry.get("link"):
                 lines.append(f"     🔗 {entry.get('link')}")
             lines.append("")
@@ -722,8 +799,8 @@ class GitHubPrivateListenPlugin(Star):
             lines.append(f"  {i}. {entry['title']}")
             if entry["published"]:
                 lines.append(f"     🕐 {entry['published']}")
-            if entry["content"]:
-                lines.append(f"     📝 {entry['content']}")
+            if entry.get("state"):
+                lines.append(f"     📌 状态: {entry.get('state')}")
             if entry["link"]:
                 lines.append(f"     🔗 {entry['link']}")
             lines.append("")
@@ -746,8 +823,8 @@ class GitHubPrivateListenPlugin(Star):
                 lc = entry.get("latest_comment")
                 snippet = (lc.get("body", "") or "").replace("\n", " ")[:300]
                 lines.append(f"     💬 最近评论 @{lc.get('author','')}: {snippet} [{lc.get('createdAt','')}]")
-            if entry.get("content"):
-                lines.append(f"     📝 {entry.get('content')}")
+            if entry.get("state"):
+                lines.append(f"     📌 状态: {entry.get('state')}")
             if entry.get("link"):
                 lines.append(f"     🔗 {entry.get('link')}")
             lines.append("")
