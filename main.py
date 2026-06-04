@@ -225,6 +225,42 @@ class GitHubPrivateListenPlugin(Star):
         except Exception:
             return time_str
 
+    def _normalize_user_display(self, user_obj: Dict[str, Any]) -> str:
+        """优先返回用户的 name（非空且不为字符串 'None'），否则回退到 login。"""
+        if not user_obj:
+            return ""
+        name = user_obj.get("name")
+        login = user_obj.get("login")
+        if isinstance(name, str) and name.strip() and name.strip().lower() != "none":
+            return name
+        if login:
+            return login
+        return ""
+
+    def _extract_assignee_logins(self, assignees_field: Any) -> List[str]:
+        """从 GraphQL/REST 的 assignees 字段中提取优先的 login，如果 login 缺失则退回到可用的 name。"""
+        nodes = []
+        if not assignees_field:
+            return []
+        if isinstance(assignees_field, dict):
+            nodes = assignees_field.get("nodes", [])
+        elif isinstance(assignees_field, list):
+            nodes = assignees_field
+        else:
+            return []
+
+        res: List[str] = []
+        for u in nodes:
+            if not isinstance(u, dict):
+                continue
+            login = u.get("login")
+            name = u.get("name")
+            if login:
+                res.append(login)
+            elif isinstance(name, str) and name.strip() and name.strip().lower() != "none":
+                res.append(name.strip())
+        return res
+
     @staticmethod
     def _extract_content(entry: Dict[str, Any], event_type: str, max_len: int = 200) -> str:
         if event_type == "issue":
@@ -336,13 +372,18 @@ class GitHubPrivateListenPlugin(Star):
 
     def _build_repo_entry_dict(self, raw: Dict, event_type: str) -> Dict:
         if event_type == "issues":
+            user_obj = raw.get("user") or {}
+            author = self._normalize_user_display(user_obj) or None
+            assignees = self._extract_assignee_logins(raw.get("assignees") or [])
             return {
                 "title": f"[Issue] #{raw['number']}: {raw['title']}",
                 "link": raw["html_url"],
                 "published": self._convert_time(raw["created_at"]),
                 "content": self._extract_content(raw, "issue"),
                 "id": str(raw["id"]),
-                "type": "issue"
+                "type": "issue",
+                "author": author,
+                "assignees": assignees,
             }
         elif event_type == "commits":
             return {
@@ -375,33 +416,65 @@ class GitHubPrivateListenPlugin(Star):
     async def _fetch_project_items(self, org: str, number: int, first: int = 50) -> List[Dict]:
         query = """
         query($org: String!, $number: Int!, $first: Int!) {
-          organization(login: $org) {
-            projectV2(number: $number) {
-              items(first: $first) {
-                nodes {
-                  id
-                  createdAt
-                  updatedAt
-                  content {
-                    __typename
-                    ... on Issue {
-                      title
-                      url
-                      number
+            organization(login: $org) {
+                projectV2(number: $number) {
+                    id
+                    title
+                    shortDescription
+                    number
+                    items(first: $first) {
+                        nodes {
+                            id
+                            createdAt
+                            updatedAt
+                            content {
+                                __typename
+                                ... on Issue {
+                                    id
+                                    number
+                                    title
+                                    url
+                                    bodyText
+                                    state
+                                    author { login ... on User { name } }
+                                    assignees(first: 50) { nodes { login name } }
+                                    comments(last: 5) {
+                                        nodes {
+                                            author { login ... on User { name } }
+                                            bodyText
+                                            createdAt
+                                        }
+                                    }
+                                }
+                                ... on PullRequest {
+                                    id
+                                    number
+                                    title
+                                    url
+                                    bodyText
+                                    state
+                                    merged
+                                    mergedAt
+                                    author { login ... on User { name } }
+                                    assignees(first: 50) { nodes { login name } }
+                                    comments(last: 5) {
+                                        nodes {
+                                            author { login ... on User { name } }
+                                            bodyText
+                                            createdAt
+                                        }
+                                    }
+                                }
+                                ... on DraftIssue {
+                                    id
+                                    title
+                                    bodyText
+                                }
+                            }
+                        }
                     }
-                    ... on PullRequest {
-                      title
-                      url
-                      number
-                    }
-                    ... on DraftIssue {
-                      title
-                    }
-                  }
                 }
-              }
             }
-          }
         }
         """
         variables = {"org": org, "number": number, "first": first}
@@ -446,35 +519,80 @@ class GitHubPrivateListenPlugin(Star):
             return {}
 
         typename = content.get("__typename")
+        title = content.get("title", "无标题")
+        url = content.get("url", "")
+        item_type = "Card"
+        number_str = ""
+        author_display = ""
+        assignees = []
+        state = ""
+        merged = False
+        latest_comment = None
+
         if typename == "Issue":
-            title = content.get("title", "无标题")
-            url = content.get("url", "")
             item_type = "Issue"
             number_str = f"#{content.get('number', '')}"
+            author_obj = content.get("author") or {}
+            author_display = self._normalize_user_display(author_obj)
+            assignees = self._extract_assignee_logins(content.get("assignees") or {})
+            state = content.get("state", "")
+            comments = content.get("comments", {}).get("nodes", []) or []
+            if comments:
+                c = comments[-1]
+                c_author_obj = c.get("author") or {}
+                latest_comment = {
+                    "author": self._normalize_user_display(c_author_obj),
+                    "body": c.get("bodyText", "") or "",
+                    "createdAt": self._convert_time(c.get("createdAt", "")),
+                }
         elif typename == "PullRequest":
-            title = content.get("title", "无标题")
-            url = content.get("url", "")
             item_type = "PR"
             number_str = f"#{content.get('number', '')}"
+            author_obj = content.get("author") or {}
+            author_display = self._normalize_user_display(author_obj)
+            assignees = self._extract_assignee_logins(content.get("assignees") or {})
+            state = content.get("state", "")
+            merged = bool(content.get("merged", False))
+            comments = content.get("comments", {}).get("nodes", []) or []
+            if comments:
+                c = comments[-1]
+                c_author_obj = c.get("author") or {}
+                latest_comment = {
+                    "author": self._normalize_user_display(c_author_obj),
+                    "body": c.get("bodyText", "") or "",
+                    "createdAt": self._convert_time(c.get("createdAt", "")),
+                }
         elif typename == "DraftIssue":
-            title = content.get("title", "无标题")
-            url = ""
             item_type = "Draft Issue"
             number_str = ""
-        else:
-            title = "未知卡片"
-            url = ""
-            item_type = "Card"
-            number_str = ""
 
-        display_title = f"[Project {org}/{number}] {item_type} {number_str}: {title}"
+        parts = []
+        if author_display:
+            parts.append(f"作者: @{author_display}")
+        if assignees:
+            parts.append("Assignees: " + ", ".join([f"@{a}" for a in assignees]))
+        if state:
+            parts.append(f"状态: {state}")
+        if merged:
+            parts.append("已合并")
+        if latest_comment:
+            snippet = latest_comment.get("body", "").replace("\n", " ")[:200]
+            parts.append(f"最近评论 @{latest_comment.get('author','')}: {snippet}")
+
+        content_summary = "\n".join(parts)
+
         return {
-            "title": display_title,
+            "title": f"[Project {org}/{number}] {item_type} {number_str}: {title}",
             "link": url,
             "published": self._convert_time(item.get("updatedAt", item.get("createdAt", ""))),
-            "content": "",
+            "content": content_summary,
             "id": item.get("id", ""),
-            "type": "project_item"
+            "type": "project_item",
+            "author": author_display,
+            "assignees": assignees,
+            "state": state,
+            "merged": merged,
+            "latest_comment": latest_comment,
         }
 
     # ==================== 轮询与推送 ====================
@@ -532,6 +650,7 @@ class GitHubPrivateListenPlugin(Star):
         for session, msg_list in messages_by_session.items():
             full_msg = "\n\n".join(msg_list)
             chain = MessageChain().message(full_msg)
+            logger.info(f"[Private GitHub] 推送到 {session}: {full_msg}")
             try:
                 await self.context.send_message(session, chain)
             except Exception as e:
@@ -548,13 +667,20 @@ class GitHubPrivateListenPlugin(Star):
         }.get(event_type, "🔔")
         lines = [f"{type_icon} 仓库 {repo} 的新{event_type}动态（{len(entries)} 条）：\n"]
         for i, entry in enumerate(entries, 1):
-            lines.append(f"  {i}. {entry['title']}")
-            if entry["published"]:
-                lines.append(f"     🕐 {entry['published']}")
-            if entry["content"]:
-                lines.append(f"     📝 {entry['content']}")
-            if entry["link"]:
-                lines.append(f"     🔗 {entry['link']}")
+            lines.append(f"  {i}. {entry.get('title')}")
+            if entry.get("published"):
+                lines.append(f"     🕐 {entry.get('published')}")
+            # 作者与指派者
+            if entry.get("author"):
+                lines.append(f"     🙋 提出者: @{entry.get('author')}")
+            if entry.get("assignees"):
+                ass = entry.get("assignees") or []
+                if ass:
+                    lines.append("     🔔 指派: " + " ".join([f"@{a}" for a in ass]))
+            if entry.get("content"):
+                lines.append(f"     📝 {entry.get('content')}")
+            if entry.get("link"):
+                lines.append(f"     🔗 {entry.get('link')}")
             lines.append("")
         return "\n".join(lines)
 
@@ -562,13 +688,25 @@ class GitHubPrivateListenPlugin(Star):
     def _format_project_entries(project_id: str, entries: List[Dict]) -> str:
         lines = [f"📌 组织项目 {project_id} 新增/更新了 {len(entries)} 个卡片：\n"]
         for i, entry in enumerate(entries, 1):
-            lines.append(f"  {i}. {entry['title']}")
-            if entry["published"]:
-                lines.append(f"     🕐 {entry['published']}")
-            if entry["content"]:
-                lines.append(f"     📝 {entry['content']}")
-            if entry["link"]:
-                lines.append(f"     🔗 {entry['link']}")
+            lines.append(f"  {i}. {entry.get('title')}")
+            if entry.get("published"):
+                lines.append(f"     🕐 {entry.get('published')}")
+            # 作者与指派者（从 _build_project_entry_dict 填充）
+            if entry.get("author"):
+                lines.append(f"     🙋 提出者: @{entry.get('author')}")
+            if entry.get("assignees"):
+                ass = entry.get("assignees") or []
+                if ass:
+                    lines.append("     🔔 指派: " + " ".join([f"@{a}" for a in ass]))
+            # 最近评论
+            if entry.get("latest_comment"):
+                lc = entry.get("latest_comment")
+                snippet = (lc.get("body", "") or "").replace("\n", " ")[:300]
+                lines.append(f"     💬 最近评论 @{lc.get('author','')}: {snippet} [{lc.get('createdAt','')}]")
+            if entry.get("content"):
+                lines.append(f"     📝 {entry.get('content')}")
+            if entry.get("link"):
+                lines.append(f"     🔗 {entry.get('link')}")
             lines.append("")
         return "\n".join(lines)
 
@@ -595,13 +733,23 @@ class GitHubPrivateListenPlugin(Star):
     def _format_single_check_project(project_id: str, entries: List[Dict]) -> str:
         lines = [f"📌 项目 {project_id} 最近的卡片：\n"]
         for i, entry in enumerate(entries, 1):
-            lines.append(f"  {i}. {entry['title']}")
-            if entry["published"]:
-                lines.append(f"     🕐 {entry['published']}")
-            if entry["content"]:
-                lines.append(f"     📝 {entry['content']}")
-            if entry["link"]:
-                lines.append(f"     🔗 {entry['link']}")
+            lines.append(f"  {i}. {entry.get('title')}")
+            if entry.get("published"):
+                lines.append(f"     🕐 {entry.get('published')}")
+            if entry.get("author"):
+                lines.append(f"     🙋 提出者: @{entry.get('author')}")
+            if entry.get("assignees"):
+                ass = entry.get("assignees") or []
+                if ass:
+                    lines.append("     🔔 指派: " + " ".join([f"@{a}" for a in ass]))
+            if entry.get("latest_comment"):
+                lc = entry.get("latest_comment")
+                snippet = (lc.get("body", "") or "").replace("\n", " ")[:300]
+                lines.append(f"     💬 最近评论 @{lc.get('author','')}: {snippet} [{lc.get('createdAt','')}]")
+            if entry.get("content"):
+                lines.append(f"     📝 {entry.get('content')}")
+            if entry.get("link"):
+                lines.append(f"     🔗 {entry.get('link')}")
             lines.append("")
         return "\n".join(lines)
 

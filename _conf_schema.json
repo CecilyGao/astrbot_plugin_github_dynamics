@@ -23,6 +23,12 @@
         "default": "Asia/Shanghai",
         "hint": "用于将 GitHub 动态的时间转换为本地时间"
     },
+    "username_qq": {
+        "description": "GitHub 用户名与 QQ 号映射",
+        "type": "object",
+        "default": {},
+        "hint": "用于将 GitHub 动态中的用户名与 QQ 号对应，可以使用 at 消息来通知。"
+    },
     "whitelist": {
         "description": "白名单用户",
         "type": "list",
