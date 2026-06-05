@@ -46,6 +46,12 @@
         },
         "hint": "用于将 GitHub 动态中的用户名与 QQ 号对应，例如 Kingcq 对应 404291187"
     },
+    "at_enable": {
+        "type": "bool",
+        "description": "是否在推送消息中 @ 对应的 QQ 号",
+        "default": false,
+        "hint": "在推送消息中 @ 对应的 QQ 号，默认不开启"
+    },
     "whitelist": {
         "description": "白名单用户",
         "type": "list",

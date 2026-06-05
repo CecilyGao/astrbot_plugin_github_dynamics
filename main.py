@@ -72,6 +72,7 @@ class GitHubPrivateListenPlugin(Star):
         self.poll_interval: int = max(config.get("poll_interval", 1800), 60)
         self.max_entries: int = max(config.get("max_entries", 5), 0)
         self.cfg_timezone: str = config.get("timezone", "Asia/Shanghai")
+        self.at_enabled: bool = config.get("at_enabled", False)
         self.whitelist: List[str] = config.get("whitelist", [])
 
         # 用户名 -> QQ 映射（管理员在配置中设置 username_qq）
@@ -725,7 +726,7 @@ class GitHubPrivateListenPlugin(Star):
                         continue
                     seen.add(a)
                     qq = self._resolve_qq_for_username(a)
-                    if qq:
+                    if qq and self.at_enabled:
                         try:
                             chain.at(a, qq)
                         except Exception:
