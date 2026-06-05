@@ -777,7 +777,6 @@ class GitHubPrivateListenPlugin(Star):
         for session, msg_list in messages_by_session.items():
             full_msg = "\n\n".join([m[0] for m in msg_list])
             chain = MessageChain().message(full_msg)
-            logger.info(f"[Private GitHub] 推送到 {session}: {full_msg}")
             seen = set()
             for _, ass in msg_list:
                 for a in ass or []:
