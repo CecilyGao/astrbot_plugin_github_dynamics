@@ -333,16 +333,15 @@ class GitHubPrivateListenPlugin(Star):
     def _extract_content(entry: Dict[str, Any], event_type: str, max_len: int = 200) -> str:
         if event_type == "issue":
             body = entry.get("body", "") or ""
-            title = entry.get("title", "")
-            return f"{title}: {body[:max_len]}".strip()
+            return body[:max_len].strip() or "无详细描述"
         elif event_type == "commit":
             commit = entry.get("commit", {})
             message = commit.get("message", "")
-            return message.split("\n")[0][:max_len]
+            # 保留完整的 commit message 摘要，遇到换行替换为空格，避免刷屏
+            return message.replace("\n", " ")[:max_len].strip()
         elif event_type == "release":
-            name = entry.get("name", "") or entry.get("tag_name", "")
             body = entry.get("body", "") or ""
-            return f"{name}: {body[:max_len]}".strip()
+            return body[:max_len].strip() or "无发布说明"
         elif event_type == "project":
             return ""
         return ""
@@ -501,18 +500,22 @@ class GitHubPrivateListenPlugin(Star):
                                     id
                                     number
                                     title
-                                    createdAt
-                                    updatedAt
                                     url
                                     bodyText
                                     state
+                                    createdAt
+                                    updatedAt
                                     author { login ... on User { name } }
                                     assignees(first: 50) { nodes { login name } }
-                                    comments(last: 5) {
+                                    comments(last: 10) {
+                                        nodes { author { login ... on User { name } } bodyText createdAt }
+                                    }
+                                    timelineItems(last: 15) {
                                         nodes {
-                                            author { login ... on User { name } }
-                                            bodyText
-                                            createdAt
+                                            __typename
+                                            ... on ClosedEvent { createdAt actor { login ... on User { name } } }
+                                            ... on ReopenedEvent { createdAt actor { login ... on User { name } } }
+                                            ... on AssignedEvent { createdAt actor { login ... on User { name } } assignee { ... on User { login name } } }
                                         }
                                     }
                                 }
@@ -520,20 +523,25 @@ class GitHubPrivateListenPlugin(Star):
                                     id
                                     number
                                     title
-                                    createdAt
-                                    updatedAt
                                     url
                                     bodyText
                                     state
                                     merged
                                     mergedAt
+                                    createdAt
+                                    updatedAt
                                     author { login ... on User { name } }
                                     assignees(first: 50) { nodes { login name } }
-                                    comments(last: 5) {
+                                    comments(last: 10) {
+                                        nodes { author { login ... on User { name } } bodyText createdAt }
+                                    }
+                                    timelineItems(last: 15) {
                                         nodes {
-                                            author { login ... on User { name } }
-                                            bodyText
-                                            createdAt
+                                            __typename
+                                            ... on ClosedEvent { createdAt actor { login ... on User { name } } }
+                                            ... on ReopenedEvent { createdAt actor { login ... on User { name } } }
+                                            ... on MergedEvent { createdAt actor { login ... on User { name } } }
+                                            ... on AssignedEvent { createdAt actor { login ... on User { name } } assignee { ... on User { login name } } }
                                         }
                                     }
                                 }
@@ -541,6 +549,8 @@ class GitHubPrivateListenPlugin(Star):
                                     id
                                     title
                                     bodyText
+                                    createdAt
+                                    updatedAt
                                 }
                             }
                         }
@@ -568,14 +578,22 @@ class GitHubPrivateListenPlugin(Star):
         if not items:
             return [], last_cursor
 
-        if "T" not in last_cursor:
-            last_cursor = "2000-01-01T00:00:00Z"
+        # 兼容旧版本：旧游标是ID字符串，不是时间。为了防止刷屏，如果是这种情况直接静默更新游标时间
+        if last_cursor and "T" not in last_cursor and last_cursor != "__EMPTY__":
+            max_time = "2000-01-01T00:00:00Z"
+            for item in items:
+                entry = self._build_project_entry_dict(item, org, number, last_cursor="__EMPTY__")
+                ts = entry.get("raw_updated_at", "")
+                if ts > max_time:
+                    max_time = ts
+            return [], max_time
 
         new_entries = []
         max_time = last_cursor
 
         for item in items:
-            entry = self._build_project_entry_dict(item, org, number)
+            # 这里传入 last_cursor，用于计算期间的具体变更
+            entry = self._build_project_entry_dict(item, org, number, last_cursor)
             if not entry:
                 continue
             
@@ -592,7 +610,7 @@ class GitHubPrivateListenPlugin(Star):
 
         return new_entries, max_time
 
-    def _build_project_entry_dict(self, item: Dict, org: str, number: int) -> Dict:
+    def _build_project_entry_dict(self, item: Dict, org: str, number: int, last_cursor: str = "") -> Dict:
         content = item.get("content")
         if not content:
             return {}
@@ -602,77 +620,88 @@ class GitHubPrivateListenPlugin(Star):
         url = content.get("url", "")
         item_type = "Card"
         number_str = ""
-        author_display = ""
+        author_display = "未知"
         assignees = []
         state = ""
         merged = False
-        latest_comment = None
 
-        if typename == "Issue":
-            item_type = "Issue"
-            number_str = f"#{content.get('number', '')}"
-            author_obj = content.get("author") or {}
-            author_display = self._normalize_user_display(author_obj)
-            assignees = self._extract_assignee_logins(content.get("assignees") or {})
-            state = content.get("state", "")
-            comments = content.get("comments", {}).get("nodes", []) or []
-            if comments:
-                c = comments[-1]
-                c_author_obj = c.get("author") or {}
-                latest_comment = {
-                    "author": self._normalize_user_display(c_author_obj),
-                    "body": c.get("bodyText", "") or "",
-                    "createdAt": self._convert_time(c.get("createdAt", "")),
-                }
-        elif typename == "PullRequest":
-            item_type = "PR"
+        if typename in ("Issue", "PullRequest"):
+            item_type = "Issue" if typename == "Issue" else "PR"
             number_str = f"#{content.get('number', '')}"
             author_obj = content.get("author") or {}
             author_display = self._normalize_user_display(author_obj)
             assignees = self._extract_assignee_logins(content.get("assignees") or {})
             state = content.get("state", "")
             merged = bool(content.get("merged", False))
-            comments = content.get("comments", {}).get("nodes", []) or []
-            if comments:
-                c = comments[-1]
-                c_author_obj = c.get("author") or {}
-                latest_comment = {
-                    "author": self._normalize_user_display(c_author_obj),
-                    "body": c.get("bodyText", "") or "",
-                    "createdAt": self._convert_time(c.get("createdAt", "")),
-                }
         elif typename == "DraftIssue":
             item_type = "Draft Issue"
-            number_str = ""
 
-        # 计算最新活跃时间
+        # --- 时间提取与分析 ---
         item_updated_at = item.get("updatedAt", "")
         content_updated_at = content.get("updatedAt", "")
         content_created_at = content.get("createdAt", "")
+        valid_times = [t for t in [item_updated_at, content_updated_at, content_created_at] if t]
         
-        # 获取最新评论的时间和作者
-        comment_time = ""
-        comment_author = ""
-        if latest_comment:
-            comment_time = latest_comment.get("createdAt", "")
-            comment_author = latest_comment.get("author", "")
+        updates = []
+        actors = set()
 
-        # 选出最晚的一个时间戳作为该卡片的“最后活跃时间”
-        valid_times = [t for t in [item_updated_at, content_updated_at, comment_time] if t]
+        def is_new(ts):
+            if not ts: return False
+            if not last_cursor or last_cursor == "__EMPTY__": return True
+            return ts > last_cursor
+
+        # 1. 判断是否是新建的卡片/议题
+        if is_new(content_created_at) and last_cursor and last_cursor != "__EMPTY__":
+            updates.append("🆕 新建卡片/议题")
+            actors.add(author_display)
+        
+        # 2. 判断新增评论和时间轴事件（如分配/关闭/重启/合并）
+        if typename in ("Issue", "PullRequest"):
+            comments = content.get("comments", {}).get("nodes", []) or []
+            for c in comments:
+                c_time = c.get("createdAt", "")
+                if is_new(c_time):
+                    c_author = self._normalize_user_display(c.get("author") or {})
+                    snippet = (c.get("bodyText", "") or "").replace("\n", " ")[:200]
+                    updates.append(f"💬 评论 (@{c_author}): {snippet}")
+                    actors.add(c_author)
+                    valid_times.append(c_time)
+            
+            timeline = content.get("timelineItems", {}).get("nodes", []) or []
+            for evt in timeline:
+                if not evt: continue
+                e_time = evt.get("createdAt", "")
+                if is_new(e_time):
+                    e_type = evt.get("__typename", "")
+                    e_actor = self._normalize_user_display(evt.get("actor") or {})
+                    if e_type == "ClosedEvent":
+                        updates.append(f"🔒 关闭了卡片 (@{e_actor} 操作)")
+                        actors.add(e_actor)
+                    elif e_type == "ReopenedEvent":
+                        updates.append(f"🔓 重新打开了卡片 (@{e_actor} 操作)")
+                        actors.add(e_actor)
+                    elif e_type == "MergedEvent":
+                        updates.append(f"🎉 合并了 PR (@{e_actor} 操作)")
+                        actors.add(e_actor)
+                    elif e_type == "AssignedEvent":
+                        assignee_obj = evt.get("assignee") or {}
+                        assignee_name = assignee_obj.get("name") or assignee_obj.get("login") or "某人"
+                        updates.append(f"👤 指派给了 @{assignee_name} (@{e_actor} 操作)")
+                        actors.add(e_actor)
+                    valid_times.append(e_time)
+
+        # 兜底：如果触发了轮询但没抓到具体变更（比如只是改了标题、标签等属性）
+        if not updates:
+            if last_cursor and last_cursor != "__EMPTY__":
+                updates.append("📌 状态/属性更新")
+            else:
+                updates.append("📌 当前状态/概览")
+
         last_active_time = max(valid_times) if valid_times else ""
-
-        # 到底更新了什么？是谁更新的？
-        update_type = "📌 状态/属性更新"
-        actor = author_display # 默认触发者是卡片提出者
-
-        if last_active_time == comment_time and comment_time:
-            update_type = "💬 新评论"
-            actor = comment_author
-        elif last_active_time == content_created_at and content_created_at:
-            update_type = "🆕 新建卡片"
+        primary_actor = list(actors)[0] if actors else author_display
 
         return {
-            "title": f"[{item_type} {number_str}] {title}".replace("[] ", ""), # 稍微优化标题格式
+            "title": f"[{item_type} {number_str}] {title}".replace("[] ", ""),
             "link": url,
             "published": self._convert_time(last_active_time),
             "raw_updated_at": last_active_time,
@@ -682,9 +711,8 @@ class GitHubPrivateListenPlugin(Star):
             "assignees": assignees,
             "state": state,
             "merged": merged,
-            "latest_comment": latest_comment,
-            "update_type": update_type,
-            "actor": actor,
+            "updates": updates, # 这里记录了一个卡片所有的具体更新动作
+            "actor": primary_actor,
         }
 
     # ==================== 轮询与推送 ====================
@@ -783,6 +811,11 @@ class GitHubPrivateListenPlugin(Star):
             lines.append(f"  {i}. {entry.get('title')}")
             if entry.get("published"):
                 lines.append(f"     🕐 时间: {entry.get('published')}")
+            
+            # 新增：展示具体的 Commit 信息 / Release 说明 / Issue 正文
+            if entry.get("content"):
+                lines.append(f"     ➤ 📝 详情: {entry.get('content')}")
+
             # 作者与指派者
             if entry.get("author"):
                 lines.append(f"     🙋 提出者: @{entry.get('author')}")
@@ -801,28 +834,24 @@ class GitHubPrivateListenPlugin(Star):
     def _format_project_entries(project_id: str, entries: List[Dict]) -> str:
         lines = [f"📢 组织项目 {project_id} 有 {len(entries)} 个新动态：\n"]
         for i, entry in enumerate(entries, 1):
-            update_type = entry.get("update_type", "📌 状态/属性更新")
-            lines.append(f"  {i}. {update_type} | {entry.get('title')}")
+            lines.append(f"  {i}. {entry.get('title')}")
             
             if entry.get("published"):
                 lines.append(f"     🕐 时间: {entry.get('published')}")
                 
-            # 如果是新评论，突出展示评论内容
-            if "新评论" in update_type and entry.get("latest_comment"):
-                lc = entry.get("latest_comment")
-                snippet = (lc.get("body", "") or "").replace("\n", " ")[:150]
-                lines.append(f"     💬 @{lc.get('author','')}: {snippet}")
-            else:
-                # 不是纯评论时，才展示状态和提出者
-                if entry.get("state"):
-                    lines.append(f"     📊 当前状态: {entry.get('state')}")
-                if entry.get("author"):
-                    lines.append(f"     🙋 提出者: @{entry.get('author')}")
+            # 列出具体发生的动作（如评论、分配、关闭等）
+            for upd in entry.get("updates", []):
+                lines.append(f"     ➤ {upd}")
+            
+            if entry.get("state"):
+                lines.append(f"     📊 当前状态: {entry.get('state')}")
+                
+            if entry.get("author"):
+                lines.append(f"     🙋 提出者: @{entry.get('author')}")
 
-            # 被指派的人（提醒用）
             ass = entry.get("assignees") or []
             if ass:
-                lines.append("     🔔 指派给: " + " ".join([f"@{a}" for a in ass]))
+                lines.append("     🔔 当前指派: " + " ".join([f"@{a}" for a in ass]))
                 
             if entry.get("link"):
                 lines.append(f"     🔗 {entry.get('link')}")
@@ -841,6 +870,11 @@ class GitHubPrivateListenPlugin(Star):
             lines.append(f"  {i}. {entry['title']}")
             if entry.get("published"):
                 lines.append(f"     🕐 时间: {entry['published']}")
+                
+            # 新增：展示具体的详情
+            if entry.get("content"):
+                lines.append(f"     ➤ 📝 详情: {entry.get('content')}")
+
             if entry.get("author"):
                 lines.append(f"     🙋 提出者: @{entry.get('author')}")
             if entry.get("assignees"):
@@ -850,7 +884,7 @@ class GitHubPrivateListenPlugin(Star):
             if entry.get("state"):
                 lines.append(f"     📊 状态: {entry.get('state')}")
             if entry.get("link"):
-                lines.append(f"     🔗 {entry.get('link')}")
+                lines.append(f"     🔗 {entry['link']}")
             lines.append("")
         return "\n".join(lines)
 
@@ -858,25 +892,24 @@ class GitHubPrivateListenPlugin(Star):
     def _format_single_check_project(project_id: str, entries: List[Dict]) -> str:
         lines = [f"📢 组织项目 {project_id} 最近的卡片动态：\n"]
         for i, entry in enumerate(entries, 1):
-            update_type = entry.get("update_type", "📌 状态/属性更新")
-            lines.append(f"  {i}. {update_type} | {entry.get('title')}")
+            lines.append(f"  {i}. {entry.get('title')}")
             
             if entry.get("published"):
                 lines.append(f"     🕐 时间: {entry.get('published')}")
                 
-            if "新评论" in update_type and entry.get("latest_comment"):
-                lc = entry.get("latest_comment")
-                snippet = (lc.get("body", "") or "").replace("\n", " ")[:150]
-                lines.append(f"     💬 @{lc.get('author','')}: {snippet}")
-            else:
-                if entry.get("state"):
-                    lines.append(f"     📊 当前状态: {entry.get('state')}")
-                if entry.get("author"):
-                    lines.append(f"     🙋 提出者: @{entry.get('author')}")
+            for upd in entry.get("updates", []):
+                lines.append(f"     ➤ {upd}")
+            
+            if entry.get("state"):
+                lines.append(f"     📊 当前状态: {entry.get('state')}")
+                
+            # 加回提出者（发起人）展示
+            if entry.get("author"):
+                lines.append(f"     🙋 提出者: @{entry.get('author')}")
 
             ass = entry.get("assignees") or []
             if ass:
-                lines.append("     🔔 指派给: " + " ".join([f"@{a}" for a in ass]))
+                lines.append("     🔔 当前指派: " + " ".join([f"@{a}" for a in ass]))
                 
             if entry.get("link"):
                 lines.append(f"     🔗 {entry.get('link')}")
