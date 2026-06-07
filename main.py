@@ -777,20 +777,29 @@ class GitHubPrivateListenPlugin(Star):
         for session, msg_list in messages_by_session.items():
             full_msg = "\n\n".join([m[0] for m in msg_list])
             chain = MessageChain().message(full_msg)
-            seen = set()
-            for _, ass in msg_list:
-                for a in ass or []:
-                    if not a:
-                        continue
-                    if a in seen:
-                        continue
-                    seen.add(a)
-                    qq = self._resolve_qq_for_username(a)
-                    if qq and self.at_enabled:
+            
+            if self.at_enabled:
+                seen = set()
+                ats = []
+                for _, ass in msg_list:
+                    for a in ass or []:
+                        if not a or a in seen:
+                            continue
+                        seen.add(a)
+                        qq = self._resolve_qq_for_username(a)
+                        if qq:
+                            ats.append((a, qq))
+                
+                # 如果存在符合条件的被指派者（且不是动作触发人），在末尾统一追加 at 提醒
+                if ats:
+                    chain.message("\n\n🔔 提醒相关人员: ")
+                    for name, qq in ats:
                         try:
-                            chain.at(a, qq)
-                        except Exception:
-                            pass
+                            chain.at(name, str(qq))
+                            chain.message(" ")
+                        except Exception as e:
+                            logger.error(f"[Private GitHub] 拼接 at 元素失败: {e}")
+
             try:
                 await self.context.send_message(session, chain)
             except Exception as e:
