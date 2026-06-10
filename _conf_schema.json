@@ -3,54 +3,44 @@
         "description": "GitHub Personal Access Token",
         "type": "string",
         "default": "",
-        "hint": "用于访问私有仓库和组织项目，格式ghp_xxxxxxxxxxxx，需具有repo、read:org、project 权限"
+        "hint": "用于访问私有仓库和组织项目，格式 ghp_xxxxxxxxxxxx，需具有 repo、read:org、user 权限"
     },
     "poll_interval": {
         "description": "轮询间隔（秒）",
         "type": "int",
         "default": 1800,
-        "hint": "每隔多少秒检查一次动态，默认1800秒（30分钟），建议不低于600秒"
+        "hint": "每隔多少秒检查一次动态，默认 1800 秒（30 分钟），建议不低于 600 秒"
     },
     "max_entries": {
         "description": "每次最多推送条目数",
         "type": "int",
         "default": 5,
-        "hint": "单次推送每个订阅项最多显示多少条新动态，设为0则不限制"
+        "hint": "单次推送每个订阅项最多显示多少条新动态，设为 0 则不限制"
     },
     "timezone": {
         "description": "时区",
         "type": "string",
         "default": "Asia/Shanghai",
-        "hint": "用于将 GitHub 动态的时间转换为本地时间"
+        "hint": "用于将 GitHub 动态的时间转换为本地时间，例如 Asia/Shanghai、America/New_York、Europe/London"
     },
     "username_qq": {
-        "type": "template_list",
+        "type": "list",
         "description": "GitHub 用户名与 QQ 号映射",
-        "templates": {
-            "mapping_item": {
-                "name": "添加映射关系",
-                "hint": "增加一个 GitHub 用户名与 QQ 号的绑定",
-                "items": {
-                    "name": {
-                        "description": "GitHub 用户名",
-                        "type": "string",
-                        "default": ""
-                    },
-                    "qq": {
-                        "description": "QQ 号",
-                        "type": "string",
-                        "default": ""
-                    }
-                }
+        "items": {
+            "type": "object",
+            "properties": {
+                "username": { "type": "string", "description": "GitHub 用户名" },
+                "qq": { "type": "string", "description": "QQ 号" }
             }
         },
-        "hint": "用于将 GitHub 动态中的用户名与 QQ 号对应，例如 Kingcq 对应 404291187"
+        "default": [],
+        "hint": "用于在推送消息中 @ 对应的 QQ 号，例如 [{ \"username\": \"Kingcq\", \"qq\": \"404291187\" }]"
     },
     "at_enable": {
         "type": "bool",
         "description": "是否在推送消息中 @ 对应的 QQ 号",
         "default": false,
-        "hint": "在推送消息中 @ 对应的 QQ 号，默认不开启"
+        "hint": "在推送消息中 @ 对应的 QQ 号，需配合 username_qq 映射使用"
     },
     "whitelist": {
         "description": "白名单用户",
