@@ -1,41 +1,35 @@
-# Changelog
+# 更新日志
 
-本文档记录了 `astrbot_plugin_private_github` 插件的所有重要变更。
+## [0.0.1] - 2026-06-10
 
-## [2.0.0] - 2026-04-25
+### 新增
+- 首次发布，融合原 `astrbot_plugin_private_github` 与 `astrbot_plugin_listen_github` 功能。
+- **支持监听类型**：
+  - GitHub 用户动态（通过 Events API，包含 Push、Issue、PR、Star、Fork 等事件）
+  - GitHub 仓库动态（Issues、Commits、Releases）
+  - GitHub 组织项目 V2 卡片动态（通过 GraphQL）
+- **订阅管理**：
+  - 每个会话独立存储订阅列表（`subscriptions.json`）
+  - 使用 KV 存储游标，增量获取新动态，避免重复推送
+  - 定时轮询所有会话订阅（默认 1800 秒，可配置）
+- **命令**：
+  - `gh subscribe` – 订阅用户/仓库/项目
+  - `gh unsubscribe` – 取消订阅（通过序号）
+  - `gh list` – 查看当前会话订阅列表
+  - `gh pushnow` – 立即推送当前会话所有订阅的新动态
+  - `gh check` – 临时查询目标动态（不订阅）
+  - `gh here` – 显示当前会话 ID 和订阅概况
+- **权限控制**：
+  - 支持管理员免白名单
+  - 支持配置 `whitelist` 限制普通用户使用指令
+- **@ 提醒功能**：
+  - 可配置 `at_enable` 开启
+  - 通过 `username_qq` 映射 GitHub 用户名与 QQ 号
+- **时区转换**：支持自定义 `timezone`，将 GitHub 时间转换为本地时间
+- **私有仓库支持**：使用 GitHub Personal Access Token（需 `repo`、`read:org`、`user` 权限）
+- **配置项**：参考 `_conf_schema.json` 完整定义
 
-### 🚀 重大变更：多会话独立订阅
-
-- **废除全局绑定机制**：移除 `bound_sessions` 配置项，每个会话（群聊/私聊）可独立管理自己的订阅，互不干扰。
-- **新增订阅管理存储**：订阅数据保存在 `data/plugins/astrbot_plugin_private_github/subscriptions.json` 中，每个订阅项单独维护游标。
-- **游标隔离**：不同会话的同一仓库/项目订阅拥有独立游标，避免互相影响。
-- **指令系统重构**：
-  - ✨ 新增 `ghp_subscribe repo <owner/repo> <issues|commits|releases>` – 订阅仓库动态
-  - ✨ 新增 `ghp_subscribe project <org/number>` – 订阅组织项目卡片
-  - ✨ 新增 `ghp_unsubscribe <序号>` – 取消当前会话的指定订阅
-  - ✨ 新增 `ghp_list_subs` – 列出当前会话的所有订阅
-  - ⚠️ 废弃 `ghp_bindhere`、`ghp_unbindhere`（仅提示，不再产生实际效果）
-  - ⚠️ 废弃 `ghp_list`（改为提示使用 `ghp_list_subs`）
-  - ✅ 保留 `ghp_pushnow` 并增强为检查所有会话的所有订阅
-  - ✅ 保留 `ghp_check` 临时手动查询功能（仍可使用）
-
-- **权限控制升级**：新增 `whitelist` 配置项（默认空），用于控制哪些普通用户可以使用订阅指令。管理员始终拥有全部权限。
-- **轮询逻辑优化**：支持每个会话独立推送，消息仅发送到产生新动态的订阅所属会话。
-- **启动行为改进**：自动为所有已有订阅初始化游标，确保不重复推送历史内容。
-
-### 🐛 修复
-
-- 修复了当项目为空时游标初始化失败的 bug。
-- 修复了 GraphQL 请求中 `orderBy` 参数导致 schema 错误的问题，改为客户端手动排序。
-- 修复了并发轮询时可能导致的游标覆盖问题。
-
----
-
-## [1.0.0] - 2026-04-25
-
-### ✨ 初始版本发布（已废弃架构）
-
-- 私有仓库监听（Issues/Commits/Releases）
-- 组织项目监听（Projects v2）
-- 全局绑定会话、全局监听项配置
-- Token 认证、定时轮询、手动推送等基础功能
+### 优化
+- 统一命令风格，去除下划线，使用自然空格分隔
+- 重构数据持久化，订阅与游标分离存储
+- 完善错误处理与日志记录
