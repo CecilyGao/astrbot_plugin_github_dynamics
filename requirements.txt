@@ -1,3 +1,1 @@
-feedparser
-aiohttp
-backports.zoneinfo;python_version<"3.9"
+aiohttp>=3.8.0
