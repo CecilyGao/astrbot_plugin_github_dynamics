@@ -12,30 +12,25 @@ except ImportError:
 
 import aiohttp
 from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.event import MessageChain
+from astrbot.api.message.components import MessageChain
 from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api import logger, AstrBotConfig
 
-# GitHub API
+# ------------------------------- 常量 ---------------------------------
 REST_API_BASE = "https://api.github.com"
 GRAPHQL_API = "https://api.github.com/graphql"
 
-# 游标存储前缀
-KV_LAST_CURSOR_PREFIX = "ghp_cursor_"
-# 订阅数据存储文件名
+KV_LAST_CURSOR_PREFIX = "ghd_cursor_"
 SUBS_FILE = "subscriptions.json"
 
-# 扫描窗口硬上限
 MAX_SCAN_ENTRIES = 50
 
-# 正则
 RE_REPO = re.compile(r"^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$")
-RE_WATCH_ITEM = re.compile(r"^([a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+):(issues|commits|releases)$")
 RE_PROJECT_ITEM = re.compile(r"^([a-zA-Z0-9._-]+)/(\d+)$")
+RE_USER = re.compile(r"^[a-zA-Z0-9](?:[a-zA-Z0-9]|-(?=[a-zA-Z0-9])){0,38}$")
 
-
+# ------------------------------- 权限辅助 ------------------------------
 def is_user_allowed(plugin, event: AstrMessageEvent) -> bool:
-    """权限检查：管理员或白名单内用户"""
     try:
         if event.is_admin():
             return True
@@ -48,26 +43,24 @@ def is_user_allowed(plugin, event: AstrMessageEvent) -> bool:
     except Exception:
         return True
 
-
 def get_session_id(event: AstrMessageEvent) -> str:
-    """获取当前会话的 unified_msg_origin"""
     return event.unified_msg_origin
 
-
+# ------------------------------- 主插件类 ------------------------------
 @register(
-    "astrbot_plugin_private_github",
+    "astrbot_plugin_github_dynamics",
     "CecilyGao",
-    "通过 GitHub API 定时获取私有仓库动态（Issues/Commits/Releases/Projects）并推送到聊天会话，支持多会话独立订阅",
-    "2.0.0",
-    "https://github.com/CecilyGao/astrbot_plugin_private_github",
+    "通过 GitHub API 监听用户动态、仓库(Issues/Commits/Releases)及组织项目动态，支持私有仓库，多会话独立订阅与定时推送",
+    "0.0.1",
+    "https://github.com/CecilyGao/astrbot_plugin_github_dynamics",
 )
-class GitHubPrivateListenPlugin(Star):
+class GitHubDynamicsPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
         self.github_token: str = config.get("github_token", "")
         if not self.github_token:
-            logger.warning("[Private GitHub] 未配置 github_token，插件将无法访问私有数据")
+            logger.warning("[GitHubDynamics] 未配置 github_token，插件将无法访问私有数据")
 
         self.poll_interval: int = max(config.get("poll_interval", 1800), 60)
         self.max_entries: int = max(config.get("max_entries", 5), 0)
@@ -75,32 +68,23 @@ class GitHubPrivateListenPlugin(Star):
         self.at_enable: bool = config.get("at_enable", False)
         self.whitelist: List[str] = config.get("whitelist", [])
 
-        # 用户名 -> QQ 映射（管理员在配置中设置 username_qq）
-        # 支持键为 github login 或 display name，值为 QQ 字符串或数字
+        # 用户名 -> QQ 映射
         self.username_qq_map: Dict[str, str] = self._load_username_qq_map()
 
         # 数据目录
-        self.data_dir = StarTools.get_data_dir("astrbot_plugin_private_github")
+        self.data_dir = StarTools.get_data_dir("astrbot_plugin_github_dynamics")
         os.makedirs(self.data_dir, exist_ok=True)
         self.subs_file = os.path.join(self.data_dir, SUBS_FILE)
 
-        # 会话订阅数据结构:
-        # {
-        #   "session_origin": [
-        #       {"type": "repo", "repo": "owner/repo", "event": "issues"},
-        #       {"type": "project", "org": "org", "number": 1}
-        #   ]
-        # }
+        # 订阅数据结构：{ session_origin: [ {type, ...}, ... ] }
         self.subscriptions: Dict[str, List[Dict]] = {}
 
         self._poll_task: Optional[asyncio.Task] = None
         self._http_session: Optional[aiohttp.ClientSession] = None
         self._load_subscriptions()
 
-    # ==================== 数据持久化 ====================
-
+    # ========================= 数据持久化 =========================
     def _load_subscriptions(self):
-        """从文件加载订阅数据（不含 cursor，cursor 单独存在 KV 中）"""
         if not os.path.exists(self.subs_file):
             self.subscriptions = {}
             return
@@ -111,13 +95,12 @@ class GitHubPrivateListenPlugin(Star):
                 self.subscriptions = {}
             else:
                 self.subscriptions = data
-            logger.info(f"[Private GitHub] 已加载 {len(self.subscriptions)} 个会话的订阅数据")
+            logger.info(f"[GitHubDynamics] 已加载 {len(self.subscriptions)} 个会话的订阅")
         except Exception as e:
-            logger.error(f"[Private GitHub] 加载订阅数据失败: {e}")
+            logger.error(f"[GitHubDynamics] 加载订阅数据失败: {e}")
             self.subscriptions = {}
 
     def _save_subscriptions(self):
-        """保存订阅数据（不含 cursor）"""
         try:
             to_save = {}
             for session, items in self.subscriptions.items():
@@ -128,66 +111,62 @@ class GitHubPrivateListenPlugin(Star):
                     to_save[session].append(copy_item)
             with open(self.subs_file, "w", encoding="utf-8") as f:
                 json.dump(to_save, f, ensure_ascii=False, indent=2)
-            logger.debug("[Private GitHub] 订阅数据已保存")
+            logger.debug("[GitHubDynamics] 订阅数据已保存")
         except Exception as e:
-            logger.error(f"[Private GitHub] 保存订阅数据失败: {e}")
+            logger.error(f"[GitHubDynamics] 保存订阅数据失败: {e}")
 
     def _get_cursor_key(self, session: str, sub: Dict) -> str:
-        """生成 KV 中游标的唯一 key"""
-        if sub["type"] == "repo":
+        if sub["type"] == "user":
+            return f"{KV_LAST_CURSOR_PREFIX}{session}_user_{sub['username']}"
+        elif sub["type"] == "repo":
             return f"{KV_LAST_CURSOR_PREFIX}{session}_{sub['repo']}_{sub['event']}"
-        else:
+        else:  # project
             return f"{KV_LAST_CURSOR_PREFIX}{session}_project_{sub['org']}_{sub['number']}"
 
     async def _get_cursor(self, session: str, sub: Dict) -> str:
-        """获取订阅项的游标"""
         key = self._get_cursor_key(session, sub)
         return await self.get_kv_data(key, "")
 
     async def _set_cursor(self, session: str, sub: Dict, cursor: str):
-        """设置订阅项的游标"""
         key = self._get_cursor_key(session, sub)
         await self.put_kv_data(key, cursor)
 
     async def _init_subscription_cursor(self, session: str, sub: Dict):
-        """初始化新订阅的游标（最新一条动态的 ID）"""
         try:
-            if sub["type"] == "repo":
+            if sub["type"] == "user":
+                latest = await self._fetch_latest_user_event(sub["username"])
+            elif sub["type"] == "repo":
                 latest = await self._fetch_latest_repo_entry(sub["repo"], sub["event"])
             else:
                 latest = await self._fetch_latest_project_item(sub["org"], sub["number"])
+
             if latest:
-                cursor = self._extract_cursor_from_entry(latest, sub["type"] if sub["type"] == "repo" else "project")
+                cursor = self._extract_cursor_from_entry(latest, sub["type"])
                 if cursor:
                     await self._set_cursor(session, sub, cursor)
-                    logger.info(f"[Private GitHub] 初始化游标成功: {self._get_cursor_key(session, sub)} -> {cursor[:20]}...")
+                    logger.info(f"[GitHubDynamics] 初始化游标成功: {self._get_cursor_key(session, sub)} -> {cursor[:20]}")
                     return
             await self._set_cursor(session, sub, "__EMPTY__")
-            logger.warning(f"[Private GitHub] 无法获取最新条目，设置占位游标: {self._get_cursor_key(session, sub)}")
+            logger.warning(f"[GitHubDynamics] 无法获取最新条目，设置占位游标: {self._get_cursor_key(session, sub)}")
         except Exception as e:
-            logger.error(f"[Private GitHub] 初始化游标失败: {e}")
+            logger.error(f"[GitHubDynamics] 初始化游标失败: {e}")
 
-    # ==================== 生命周期 ====================
-
+    # ========================= 生命周期 =========================
     async def initialize(self):
         if not self.github_token:
-            logger.error("[Private GitHub] github_token 未配置，插件将无法正常工作")
+            logger.error("[GitHubDynamics] github_token 未配置，插件将无法正常工作")
         logger.info(
-            f"[Private GitHub] 插件初始化，轮询间隔: {self.poll_interval} 秒，"
-            f"已加载 {len(self.subscriptions)} 个会话的订阅"
+            f"[GitHubDynamics] 初始化完成，轮询间隔: {self.poll_interval} 秒，"
+            f"已加载 {len(self.subscriptions)} 个会话订阅"
         )
         self._http_session = aiohttp.ClientSession(
-            headers={
-                "Authorization": f"token {self.github_token}",
-                "Accept": "application/vnd.github.v3+json",
-            },
+            headers={"Authorization": f"token {self.github_token}", "Accept": "application/vnd.github.v3+json"},
             timeout=aiohttp.ClientTimeout(total=30)
         )
         await self._ensure_all_cursors()
         self._poll_task = asyncio.create_task(self._poll_loop())
 
     async def _ensure_all_cursors(self):
-        """确保所有订阅项都有游标"""
         for session, items in self.subscriptions.items():
             for sub in items:
                 cursor = await self._get_cursor(session, sub)
@@ -203,19 +182,20 @@ class GitHubPrivateListenPlugin(Star):
                 pass
         if self._http_session and not self._http_session.closed:
             await self._http_session.close()
-        logger.info("[Private GitHub] 插件已卸载")
+        logger.info("[GitHubDynamics] 插件已卸载")
 
-    # ==================== 辅助函数 ====================
-
+    # ========================= 辅助函数 =========================
     @staticmethod
-    def _extract_cursor_from_entry(entry: Dict[str, Any], item_type: str) -> str:
-        if item_type in ("issue", "issues", "repo"):
+    def _extract_cursor_from_entry(entry: Dict[str, Any], sub_type: str) -> str:
+        if sub_type == "user":
             return str(entry.get("id", ""))
-        elif item_type in ("commit", "commits"):
+        elif sub_type in ("issue", "issues", "repo"):
+            return str(entry.get("id", ""))
+        elif sub_type in ("commit", "commits"):
             return entry.get("sha", "")
-        elif item_type in ("release", "releases"):
+        elif sub_type in ("release", "releases"):
             return str(entry.get("id", ""))
-        elif item_type == "project":
+        elif sub_type == "project":
             return entry.get("raw_updated_at", "2000-01-01T00:00:00Z")
         return ""
 
@@ -231,130 +211,31 @@ class GitHubPrivateListenPlugin(Star):
             return time_str
 
     def _load_username_qq_map(self) -> Dict[str, str]:
-        raw = []
-        try:
-            raw = self.config.get("username_qq", []) or []
-            if isinstance(raw, str):
-                import json
-                try:
-                    raw = json.loads(raw)
-                except Exception:
-                    pass
-        except Exception:
-            raw = []
-
-        mapping: Dict[str, str] = {}
-
-        def store(key_raw: Any, qq_raw: Any):
+        raw = self.config.get("username_qq", []) or []
+        if isinstance(raw, str):
             try:
-                key = str(key_raw).strip().lstrip("@").lower()
-                if not key:
-                    return
+                raw = json.loads(raw)
             except Exception:
-                return
-            try:
-                qq_str = str(qq_raw).strip()
-            except Exception:
-                return
-            import re
-
-            digits = re.sub(r"\D+", "", qq_str)
-            if not digits:
-                logger.warning(f"[Private GitHub] username_qq: QQ for '{key}' is invalid or contains no digits: '{qq_str}' - skipped")
-                return
-            if digits != qq_str:
-                logger.warning(f"[Private GitHub] username_qq: QQ '{qq_str}' for '{key}' contained non-digits; using '{digits}'")
-            mapping[key] = digits
-
+                pass
+        mapping = {}
         if isinstance(raw, dict):
             for k, v in raw.items():
-                store(k, v)
-            return mapping
-
-        if isinstance(raw, list):
+                mapping[str(k).strip().lower()] = str(v).strip()
+        elif isinstance(raw, list):
             for item in raw:
                 if isinstance(item, dict):
-                    username = item.get("username") or item.get("login") or item.get("name") or item.get("user")
-                    qq = item.get("qq") or item.get("QQ") or item.get("q")
-                    if username and qq is not None:
-                        store(username, qq)
-                        continue
-                elif isinstance(item, str):
-                    s = item.strip()
-                    if ":" in s:
-                        a, b = s.split(":", 1)
-                        store(a, b)
-            return mapping
-
+                    username = item.get("username") or item.get("login")
+                    qq = item.get("qq")
+                    if username and qq:
+                        mapping[str(username).strip().lower()] = str(qq).strip()
         return mapping
 
     def _resolve_qq_for_username(self, username: str) -> Optional[str]:
         if not username:
             return None
-        mapping = self._load_username_qq_map()
-        key = str(username).strip().lstrip("@").lower()
-        return mapping.get(key)
+        return self.username_qq_map.get(username.strip().lower())
 
-    def _normalize_user_display(self, user_obj: Dict[str, Any]) -> str:
-        """优先返回用户的 name（非空且不为字符串 'None'），否则回退到 login。"""
-        if not user_obj:
-            return ""
-        name = user_obj.get("name")
-        login = user_obj.get("login")
-        if isinstance(name, str) and name.strip() and name.strip().lower() != "none":
-            return name
-        if login:
-            return login
-        return ""
-
-    def _extract_assignee_logins(self, assignees_field: Any) -> List[str]:
-        """从 GraphQL/REST 的 assignees 字段中提取用户显示名或登录名。
-
-        优先使用 `name`（非空且不为字符串 'None'），否则回退到 `login`。
-        返回值为字符串列表，方便用于消息展示与 QQ 映射查找。
-        """
-        nodes = []
-        if not assignees_field:
-            return []
-        # 支持两种常见结构：{ 'nodes': [...] } 或直接为列表
-        if isinstance(assignees_field, dict):
-            nodes = assignees_field.get("nodes", [])
-        elif isinstance(assignees_field, list):
-            nodes = assignees_field
-        else:
-            return []
-
-        res: List[str] = []
-        for u in nodes:
-            if not isinstance(u, dict):
-                continue
-            name = u.get("name")
-            login = u.get("login")
-            if isinstance(name, str) and name.strip() and name.strip().lower() != "none":
-                res.append(name.strip())
-            elif login:
-                res.append(login)
-        return res
-
-    @staticmethod
-    def _extract_content(entry: Dict[str, Any], event_type: str, max_len: int = 200) -> str:
-        if event_type == "issue":
-            body = entry.get("body", "") or ""
-            return body[:max_len].strip() or "无详细描述"
-        elif event_type == "commit":
-            commit = entry.get("commit", {})
-            message = commit.get("message", "")
-            # 保留完整的 commit message 摘要，遇到换行替换为空格，避免刷屏
-            return message.replace("\n", " ")[:max_len].strip()
-        elif event_type == "release":
-            body = entry.get("body", "") or ""
-            return body[:max_len].strip() or "无发布说明"
-        elif event_type == "project":
-            return ""
-        return ""
-
-    # ==================== GitHub API 请求 ====================
-
+    # ========================= GitHub API 请求 =========================
     async def _rest_api_get(self, url: str) -> Optional[List[Dict]]:
         if not self._http_session or self._http_session.closed:
             self._http_session = aiohttp.ClientSession(
@@ -364,10 +245,10 @@ class GitHubPrivateListenPlugin(Star):
         try:
             async with self._http_session.get(url) as resp:
                 if resp.status == 404:
-                    logger.warning(f"[Private GitHub] API 404: {url}")
+                    logger.warning(f"[GitHubDynamics] API 404: {url}")
                     return None
                 if resp.status != 200:
-                    logger.warning(f"[Private GitHub] API 请求失败: {url} -> HTTP {resp.status}")
+                    logger.warning(f"[GitHubDynamics] API 请求失败: {url} -> HTTP {resp.status}")
                     return None
                 data = await resp.json()
                 if isinstance(data, list):
@@ -375,7 +256,7 @@ class GitHubPrivateListenPlugin(Star):
                 else:
                     return [data]
         except Exception as e:
-            logger.error(f"[Private GitHub] API 请求异常: {url} -> {e}")
+            logger.error(f"[GitHubDynamics] API 请求异常: {url} -> {e}")
             return None
 
     async def _graphql_request(self, query: str, variables: Dict = None) -> Optional[Dict]:
@@ -390,19 +271,101 @@ class GitHubPrivateListenPlugin(Star):
                 payload["variables"] = variables
             async with self._http_session.post(GRAPHQL_API, json=payload) as resp:
                 if resp.status != 200:
-                    logger.warning(f"[Private GitHub] GraphQL 请求失败: HTTP {resp.status}")
+                    logger.warning(f"[GitHubDynamics] GraphQL 请求失败: HTTP {resp.status}")
                     return None
                 data = await resp.json()
                 if "errors" in data:
-                    logger.warning(f"[Private GitHub] GraphQL 错误: {data['errors']}")
+                    logger.warning(f"[GitHubDynamics] GraphQL 错误: {data['errors']}")
                     return None
                 return data.get("data")
         except Exception as e:
-            logger.error(f"[Private GitHub] GraphQL 请求异常: {e}")
+            logger.error(f"[GitHubDynamics] GraphQL 请求异常: {e}")
             return None
 
-    # ==================== 仓库监听 (REST) ====================
+    # ========================= 用户动态监听 =========================
+    async def _fetch_user_events(self, username: str, per_page: int = 30) -> Optional[List[Dict]]:
+        url = f"{REST_API_BASE}/users/{username}/events?per_page={per_page}"
+        return await self._rest_api_get(url)
 
+    async def _fetch_latest_user_event(self, username: str) -> Optional[Dict]:
+        events = await self._fetch_user_events(username, per_page=1)
+        if events and len(events) > 0:
+            return events[0]
+        return None
+
+    async def _fetch_new_user_entries(self, username: str, last_cursor: str) -> Tuple[List[Dict], str]:
+        per_page = MAX_SCAN_ENTRIES
+        events = await self._fetch_user_events(username, per_page=per_page)
+        if not events:
+            return [], last_cursor
+
+        new_entries = []
+        for event in events:
+            event_id = str(event.get("id", ""))
+            if event_id == last_cursor:
+                break
+            entry = self._build_user_entry_dict(event)
+            if entry:
+                new_entries.append(entry)
+
+        if self.max_entries > 0 and len(new_entries) > self.max_entries:
+            new_entries = new_entries[:self.max_entries]
+
+        if new_entries and events:
+            latest_cursor = str(events[0].get("id", ""))
+            return new_entries, latest_cursor
+        return new_entries, last_cursor
+
+    def _build_user_entry_dict(self, event: Dict) -> Dict:
+        event_type = event.get("type", "Unknown")
+        repo = event.get("repo", {}).get("name", "unknown/repo")
+        created_at = event.get("created_at", "")
+        payload = event.get("payload", {})
+
+        title = f"[{event_type}] {repo}"
+        link = f"https://github.com/{repo}"
+        content = ""
+
+        if event_type == "PushEvent":
+            commits = payload.get("commits", [])
+            cnt = len(commits)
+            content = f"推送了 {cnt} 个提交"
+        elif event_type == "IssuesEvent":
+            action = payload.get("action", "")
+            issue = payload.get("issue", {})
+            number = issue.get("number", "")
+            content = f"{action} issue #{number}: {issue.get('title', '')[:80]}"
+            link = issue.get("html_url", link)
+        elif event_type == "PullRequestEvent":
+            action = payload.get("action", "")
+            pr = payload.get("pull_request", {})
+            number = pr.get("number", "")
+            content = f"{action} PR #{number}: {pr.get('title', '')[:80]}"
+            link = pr.get("html_url", link)
+        elif event_type == "CreateEvent":
+            ref_type = payload.get("ref_type", "")
+            ref = payload.get("ref", "")
+            content = f"创建了 {ref_type} {ref}".strip()
+        elif event_type == "WatchEvent":
+            content = "Star 了仓库"
+        elif event_type == "ForkEvent":
+            forkee = payload.get("forkee", {})
+            content = f"Fork 了仓库到 {forkee.get('full_name', '')}"
+            link = forkee.get("html_url", link)
+        else:
+            content = f"触发了 {event_type} 事件"
+
+        return {
+            "title": title,
+            "link": link,
+            "published": self._convert_time(created_at),
+            "content": content,
+            "id": str(event.get("id", "")),
+            "type": "user_event",
+            "author": username,
+        }
+
+    # ========================= 仓库动态 (Issues/Commits/Releases) =========================
     async def _fetch_latest_repo_entry(self, repo: str, event_type: str) -> Optional[Dict]:
         url = self._build_repo_api_url(repo, event_type, per_page=1)
         data = await self._rest_api_get(url)
@@ -446,41 +409,38 @@ class GitHubPrivateListenPlugin(Star):
 
     def _build_repo_entry_dict(self, raw: Dict, event_type: str) -> Dict:
         if event_type == "issues":
-            user_obj = raw.get("user") or {}
-            author = self._normalize_user_display(user_obj) or None
-            assignees = self._extract_assignee_logins(raw.get("assignees") or [])
+            user = raw.get("user", {})
             return {
                 "title": f"[Issue] #{raw['number']}: {raw['title']}",
                 "link": raw["html_url"],
                 "published": self._convert_time(raw["created_at"]),
-                "content": self._extract_content(raw, "issue"),
+                "content": (raw.get("body") or "")[:200],
                 "id": str(raw["id"]),
                 "type": "issue",
-                "author": author,
-                "assignees": assignees,
+                "author": user.get("login", ""),
             }
         elif event_type == "commits":
+            commit = raw.get("commit", {})
             return {
-                "title": f"[Commit] {raw['sha'][:7]}: {raw['commit']['message'].splitlines()[0][:100]}",
+                "title": f"[Commit] {raw['sha'][:7]}: {commit.get('message', '').splitlines()[0][:100]}",
                 "link": raw["html_url"],
-                "published": self._convert_time(raw["commit"]["committer"]["date"]),
-                "content": self._extract_content(raw, "commit"),
+                "published": self._convert_time(commit.get("committer", {}).get("date", "")),
+                "content": commit.get("message", "").replace("\n", " ")[:200],
                 "id": raw["sha"],
-                "type": "commit"
+                "type": "commit",
             }
         elif event_type == "releases":
             return {
-                "title": f"[Release] {raw['tag_name']}: {raw['name'] or raw['tag_name']}",
+                "title": f"[Release] {raw['tag_name']}: {raw.get('name') or raw['tag_name']}",
                 "link": raw["html_url"],
-                "published": self._convert_time(raw["published_at"] or raw["created_at"]),
-                "content": self._extract_content(raw, "release"),
+                "published": self._convert_time(raw.get("published_at") or raw["created_at"]),
+                "content": (raw.get("body") or "")[:200],
                 "id": str(raw["id"]),
-                "type": "release"
+                "type": "release",
             }
         return {}
 
-    # ==================== 组织项目监听 (GraphQL) ====================
-
+    # ========================= 组织项目监听 (GraphQL) =========================
     async def _fetch_latest_project_item(self, org: str, number: int) -> Optional[Dict]:
         items = await self._fetch_project_items(org, number, first=1)
         if items:
@@ -492,72 +452,24 @@ class GitHubPrivateListenPlugin(Star):
         query($org: String!, $number: Int!, $first: Int!) {
             organization(login: $org) {
                 projectV2(number: $number) {
-                    id
-                    title
-                    shortDescription
-                    number
+                    id title number
                     items(first: $first) {
                         nodes {
-                            id
-                            createdAt
-                            updatedAt
+                            id createdAt updatedAt
                             content {
                                 __typename
                                 ... on Issue {
-                                    id
-                                    number
-                                    title
-                                    url
-                                    bodyText
-                                    state
-                                    createdAt
-                                    updatedAt
-                                    author { login ... on User { name } }
-                                    assignees(first: 50) { nodes { login name } }
-                                    comments(last: 10) {
-                                        nodes { author { login ... on User { name } } bodyText createdAt }
-                                    }
-                                    timelineItems(last: 15) {
-                                        nodes {
-                                            __typename
-                                            ... on ClosedEvent { createdAt actor { login ... on User { name } } }
-                                            ... on ReopenedEvent { createdAt actor { login ... on User { name } } }
-                                            ... on AssignedEvent { createdAt actor { login ... on User { name } } assignee { ... on User { login name } } }
-                                        }
-                                    }
+                                    id number title url bodyText state
+                                    createdAt updatedAt
+                                    author { login name }
                                 }
                                 ... on PullRequest {
-                                    id
-                                    number
-                                    title
-                                    url
-                                    bodyText
-                                    state
-                                    merged
-                                    mergedAt
-                                    createdAt
-                                    updatedAt
-                                    author { login ... on User { name } }
-                                    assignees(first: 50) { nodes { login name } }
-                                    comments(last: 10) {
-                                        nodes { author { login ... on User { name } } bodyText createdAt }
-                                    }
-                                    timelineItems(last: 15) {
-                                        nodes {
-                                            __typename
-                                            ... on ClosedEvent { createdAt actor { login ... on User { name } } }
-                                            ... on ReopenedEvent { createdAt actor { login ... on User { name } } }
-                                            ... on MergedEvent { createdAt actor { login ... on User { name } } }
-                                            ... on AssignedEvent { createdAt actor { login ... on User { name } } assignee { ... on User { login name } } }
-                                        }
-                                    }
+                                    id number title url bodyText state merged mergedAt
+                                    createdAt updatedAt
+                                    author { login name }
                                 }
                                 ... on DraftIssue {
-                                    id
-                                    title
-                                    bodyText
-                                    createdAt
-                                    updatedAt
+                                    id title bodyText createdAt updatedAt
                                 }
                             }
                         }
@@ -585,155 +497,52 @@ class GitHubPrivateListenPlugin(Star):
         if not items:
             return [], last_cursor
 
-        # 兼容旧版本：旧游标是ID字符串，不是时间。为了防止刷屏，如果是这种情况直接静默更新游标时间
-        if last_cursor and "T" not in last_cursor and last_cursor != "__EMPTY__":
-            max_time = "2000-01-01T00:00:00Z"
-            for item in items:
-                entry = self._build_project_entry_dict(item, org, number, last_cursor="__EMPTY__")
-                ts = entry.get("raw_updated_at", "")
-                if ts > max_time:
-                    max_time = ts
-            return [], max_time
-
         new_entries = []
         max_time = last_cursor
-
         for item in items:
-            # 这里传入 last_cursor，用于计算期间的具体变更
-            entry = self._build_project_entry_dict(item, org, number, last_cursor)
+            entry = self._build_project_entry_dict(item, org, number)
             if not entry:
                 continue
-            
             entry_time = entry.get("raw_updated_at", "")
             if entry_time > last_cursor:
                 new_entries.append(entry)
                 if entry_time > max_time:
                     max_time = entry_time
 
-        new_entries.sort(key=lambda x: x.get("raw_updated_at", ""))
-
         if self.max_entries > 0 and len(new_entries) > self.max_entries:
             new_entries = new_entries[-self.max_entries:]
 
         return new_entries, max_time
 
-    def _build_project_entry_dict(self, item: Dict, org: str, number: int, last_cursor: str = "") -> Dict:
+    def _build_project_entry_dict(self, item: Dict, org: str, number: int) -> Dict:
         content = item.get("content")
         if not content:
             return {}
-
-        typename = content.get("__typename")
+        typename = content.get("__typename", "Card")
         title = content.get("title", "无标题")
         url = content.get("url", "")
-        item_type = "Card"
-        number_str = ""
-        author_display = "未知"
-        assignees = []
-        state = ""
-        merged = False
-
-        if typename in ("Issue", "PullRequest"):
-            item_type = "Issue" if typename == "Issue" else "PR"
-            number_str = f"#{content.get('number', '')}"
-            author_obj = content.get("author") or {}
-            author_display = self._normalize_user_display(author_obj)
-            assignees = self._extract_assignee_logins(content.get("assignees") or {})
-            state = content.get("state", "")
-            merged = bool(content.get("merged", False))
-        elif typename == "DraftIssue":
-            item_type = "Draft Issue"
-
-        # --- 时间提取与分析 ---
-        item_updated_at = item.get("updatedAt", "")
-        content_updated_at = content.get("updatedAt", "")
-        content_created_at = content.get("createdAt", "")
-        valid_times = [t for t in [item_updated_at, content_updated_at, content_created_at] if t]
-        
-        updates = []
-        actors = set()
-
-        def is_new(ts):
-            if not ts: return False
-            if not last_cursor or last_cursor == "__EMPTY__": return True
-            return ts > last_cursor
-
-        # 1. 判断是否是新建的卡片/议题
-        if is_new(content_created_at) and last_cursor and last_cursor != "__EMPTY__":
-            updates.append("🆕 新建卡片/议题")
-            actors.add(author_display)
-        
-        # 2. 判断新增评论和时间轴事件（如分配/关闭/重启/合并）
-        if typename in ("Issue", "PullRequest"):
-            comments = content.get("comments", {}).get("nodes", []) or []
-            for c in comments:
-                c_time = c.get("createdAt", "")
-                if is_new(c_time):
-                    c_author = self._normalize_user_display(c.get("author") or {})
-                    snippet = (c.get("bodyText", "") or "").replace("\n", " ")[:200]
-                    updates.append(f"💬 评论 (@{c_author}): {snippet}")
-                    actors.add(c_author)
-                    valid_times.append(c_time)
-            
-            timeline = content.get("timelineItems", {}).get("nodes", []) or []
-            for evt in timeline:
-                if not evt: continue
-                e_time = evt.get("createdAt", "")
-                if is_new(e_time):
-                    e_type = evt.get("__typename", "")
-                    e_actor = self._normalize_user_display(evt.get("actor") or {})
-                    if e_type == "ClosedEvent":
-                        updates.append(f"🔒 关闭了卡片 (@{e_actor} 操作)")
-                        actors.add(e_actor)
-                    elif e_type == "ReopenedEvent":
-                        updates.append(f"🔓 重新打开了卡片 (@{e_actor} 操作)")
-                        actors.add(e_actor)
-                    elif e_type == "MergedEvent":
-                        updates.append(f"🎉 合并了 PR (@{e_actor} 操作)")
-                        actors.add(e_actor)
-                    elif e_type == "AssignedEvent":
-                        assignee_obj = evt.get("assignee") or {}
-                        assignee_name = assignee_obj.get("name") or assignee_obj.get("login") or "某人"
-                        updates.append(f"👤 指派给了 @{assignee_name} (@{e_actor} 操作)")
-                        actors.add(e_actor)
-                    valid_times.append(e_time)
-
-        # 兜底：如果触发了轮询但没抓到具体变更（比如只是改了标题、标签等属性）
-        if not updates:
-            if last_cursor and last_cursor != "__EMPTY__":
-                updates.append("📌 状态/属性更新")
-            else:
-                updates.append("📌 当前状态/概览")
-
-        last_active_time = max(valid_times) if valid_times else ""
-        primary_actor = list(actors)[0] if actors else author_display
-
+        updated_at = content.get("updatedAt") or item.get("updatedAt") or ""
         return {
-            "title": f"[{item_type} {number_str}] {title}".replace("[] ", ""),
+            "title": f"[{typename}] {title}",
             "link": url,
-            "published": self._convert_time(last_active_time),
-            "raw_updated_at": last_active_time,
+            "published": self._convert_time(updated_at),
+            "raw_updated_at": updated_at,
             "id": item.get("id", ""),
             "type": "project_item",
-            "author": author_display,
-            "assignees": assignees,
-            "state": state,
-            "merged": merged,
-            "updates": updates, # 这里记录了一个卡片所有的具体更新动作
-            "actor": primary_actor,
+            "content": (content.get("bodyText") or "")[:200],
         }
 
-    # ==================== 轮询与推送 ====================
-
+    # ========================= 轮询与推送 =========================
     async def _poll_loop(self):
         await asyncio.sleep(10)
         while True:
             try:
                 await self._do_poll()
             except asyncio.CancelledError:
-                logger.info("[Private GitHub] 轮询任务已取消")
+                logger.info("[GitHubDynamics] 轮询任务已取消")
                 return
             except Exception as e:
-                logger.error(f"[Private GitHub] 轮询出错: {e}")
+                logger.error(f"[GitHubDynamics] 轮询出错: {e}")
             await asyncio.sleep(self.poll_interval)
 
     async def _do_poll(self):
@@ -752,265 +561,162 @@ class GitHubPrivateListenPlugin(Star):
                     if last_cursor == "__EMPTY__":
                         continue
 
-                    if sub["type"] == "repo":
-                        new_entries, new_cursor = await self._fetch_new_repo_entries(
-                            sub["repo"], sub["event"], last_cursor
-                        )
-                    else:
-                        new_entries, new_cursor = await self._fetch_new_project_entries(
-                            sub["org"], sub["number"], last_cursor
-                        )
+                    if sub["type"] == "user":
+                        new_entries, new_cursor = await self._fetch_new_user_entries(sub["username"], last_cursor)
+                    elif sub["type"] == "repo":
+                        new_entries, new_cursor = await self._fetch_new_repo_entries(sub["repo"], sub["event"], last_cursor)
+                    else:  # project
+                        new_entries, new_cursor = await self._fetch_new_project_entries(sub["org"], sub["number"], last_cursor)
 
                     if new_entries:
-                        if sub["type"] == "repo":
+                        if sub["type"] == "user":
+                            msg = self._format_user_entries(sub["username"], new_entries)
+                        elif sub["type"] == "repo":
                             msg = self._format_repo_entries(sub["repo"], sub["event"], new_entries)
                         else:
                             msg = self._format_project_entries(f"{sub['org']}/{sub['number']}", new_entries)
+
                         if msg:
-                            assignees_to_notify = set()
-                            for entry in new_entries:
-                                actor = entry.get("actor", "")
-                                for a in entry.get("assignees", []):
-                                    if a and a != actor:
-                                        assignees_to_notify.add(a)
-                            
-                            messages_by_session.setdefault(session, []).append((msg, list(assignees_to_notify)))
+                            assignees = []
+                            for e in new_entries:
+                                if e.get("author"):
+                                    assignees.append(e["author"])
+                            messages_by_session.setdefault(session, []).append((msg, assignees))
 
                     if new_cursor and new_cursor != last_cursor:
                         await self._set_cursor(session, sub, new_cursor)
                 except Exception as e:
-                    logger.error(f"[Private GitHub] 处理订阅 {sub} 失败: {e}")
+                    logger.error(f"[GitHubDynamics] 处理订阅 {sub} 失败: {e}")
 
         for session, msg_list in messages_by_session.items():
             full_msg = "\n\n".join([m[0] for m in msg_list])
-            
-            raw_at_enable = self.config.get("at_enable", False)
-            if isinstance(raw_at_enable, str):
-                is_at_enable = raw_at_enable.lower() == "true"
-            else:
-                is_at_enable = bool(raw_at_enable)
-
-            ats = []
-            if is_at_enable:
-                seen = set()
+            chain = MessageChain().message(full_msg)
+            if self.at_enable:
+                ats = set()
                 for _, ass in msg_list:
-                    for a in ass or []:
-                        if not a or a in seen:
-                            continue
-                        seen.add(a)
+                    for a in ass:
                         qq = self._resolve_qq_for_username(a)
                         if qq:
-                            ats.append((a, qq))
-            
-            if ats:
-                full_msg += "\n\n🔔 提醒相关人员: "
-
-            chain = MessageChain().message(full_msg)
-            
-            if ats:
+                            ats.add((a, qq))
                 for name, qq in ats:
                     try:
                         chain.at(name, str(qq))
                         chain.message(" ")
-                    except Exception as e:
-                        logger.error(f"[Private GitHub] 拼接 at 元素失败: {e}")
-
+                    except Exception:
+                        pass
             try:
                 await self.context.send_message(session, chain)
             except Exception as e:
-                logger.error(f"[Private GitHub] 推送到 {session} 失败: {e}")
+                logger.error(f"[GitHubDynamics] 推送到 {session} 失败: {e}")
 
-    # ==================== 消息格式化 ====================
+    # ========================= 消息格式化 =========================
+    @staticmethod
+    def _format_user_entries(username: str, entries: List[Dict]) -> str:
+        lines = [f"👤 用户 {username} 的新动态（{len(entries)} 条）：\n"]
+        for i, e in enumerate(entries, 1):
+            lines.append(f"  {i}. {e['title']}")
+            if e.get("published"):
+                lines.append(f"     🕐 时间: {e['published']}")
+            if e.get("content"):
+                lines.append(f"     📝 {e['content']}")
+            if e.get("link"):
+                lines.append(f"     🔗 {e['link']}")
+            lines.append("")
+        return "\n".join(lines)
 
     @staticmethod
     def _format_repo_entries(repo: str, event_type: str, entries: List[Dict]) -> str:
-        type_icon = {
-            "issues": "🐛",
-            "commits": "📝",
-            "releases": "📦"
-        }.get(event_type, "🔔")
-        lines = [f"{type_icon} 仓库 {repo} 的新 {event_type} 动态（{len(entries)} 条）：\n"]
-        for i, entry in enumerate(entries, 1):
-            lines.append(f"  {i}. {entry.get('title')}")
-            if entry.get("published"):
-                lines.append(f"     🕐 时间: {entry.get('published')}")
-            
-            # 新增：展示具体的 Commit 信息 / Release 说明 / Issue 正文
-            if entry.get("content"):
-                lines.append(f"     ➤ 📝 详情: {entry.get('content')}")
-
-            # 作者与指派者
-            if entry.get("author"):
-                lines.append(f"     🙋 提出者: @{entry.get('author')}")
-            if entry.get("assignees"):
-                ass = entry.get("assignees") or []
-                if ass:
-                    lines.append("     🔔 指派给: " + " ".join([f"@{a}" for a in ass]))
-            if entry.get("state"):
-                lines.append(f"     📊 状态: {entry.get('state')}")
-            if entry.get("link"):
-                lines.append(f"     🔗 {entry.get('link')}")
+        icon = {"issues": "🐛", "commits": "📝", "releases": "📦"}.get(event_type, "🔔")
+        lines = [f"{icon} 仓库 {repo} 的新 {event_type} 动态（{len(entries)} 条）：\n"]
+        for i, e in enumerate(entries, 1):
+            lines.append(f"  {i}. {e['title']}")
+            if e.get("published"):
+                lines.append(f"     🕐 时间: {e['published']}")
+            if e.get("content"):
+                lines.append(f"     📝 {e['content']}")
+            if e.get("author"):
+                lines.append(f"     🙋 提出者: @{e['author']}")
+            if e.get("link"):
+                lines.append(f"     🔗 {e['link']}")
             lines.append("")
         return "\n".join(lines)
 
     @staticmethod
     def _format_project_entries(project_id: str, entries: List[Dict]) -> str:
         lines = [f"📢 组织项目 {project_id} 有 {len(entries)} 个新动态：\n"]
-        for i, entry in enumerate(entries, 1):
-            lines.append(f"  {i}. {entry.get('title')}")
-            
-            if entry.get("published"):
-                lines.append(f"     🕐 时间: {entry.get('published')}")
-                
-            # 列出具体发生的动作（如评论、分配、关闭等）
-            for upd in entry.get("updates", []):
-                lines.append(f"     ➤ {upd}")
-            
-            if entry.get("state"):
-                lines.append(f"     📊 当前状态: {entry.get('state')}")
-                
-            if entry.get("author"):
-                lines.append(f"     🙋 提出者: @{entry.get('author')}")
-
-            ass = entry.get("assignees") or []
-            if ass:
-                lines.append("     🔔 当前指派: " + " ".join([f"@{a}" for a in ass]))
-                
-            if entry.get("link"):
-                lines.append(f"     🔗 {entry.get('link')}")
+        for i, e in enumerate(entries, 1):
+            lines.append(f"  {i}. {e['title']}")
+            if e.get("published"):
+                lines.append(f"     🕐 时间: {e['published']}")
+            if e.get("content"):
+                lines.append(f"     📝 {e['content']}")
+            if e.get("link"):
+                lines.append(f"     🔗 {e['link']}")
             lines.append("")
         return "\n".join(lines)
 
-    @staticmethod
-    def _format_single_check_repo(repo: str, event_type: str, entries: List[Dict]) -> str:
-        type_icon = {
-            "issues": "🐛",
-            "commits": "📝",
-            "releases": "📦"
-        }.get(event_type, "🔔")
-        lines = [f"{type_icon} 仓库 {repo} 最近的 {event_type} 动态：\n"]
-        for i, entry in enumerate(entries, 1):
-            lines.append(f"  {i}. {entry['title']}")
-            if entry.get("published"):
-                lines.append(f"     🕐 时间: {entry['published']}")
-                
-            # 新增：展示具体的详情
-            if entry.get("content"):
-                lines.append(f"     ➤ 📝 详情: {entry.get('content')}")
-
-            if entry.get("author"):
-                lines.append(f"     🙋 提出者: @{entry.get('author')}")
-            if entry.get("assignees"):
-                ass = entry.get("assignees") or []
-                if ass:
-                    lines.append("     🔔 指派给: " + " ".join([f"@{a}" for a in ass]))
-            if entry.get("state"):
-                lines.append(f"     📊 状态: {entry.get('state')}")
-            if entry.get("link"):
-                lines.append(f"     🔗 {entry['link']}")
-            lines.append("")
-        return "\n".join(lines)
-
-    @staticmethod
-    def _format_single_check_project(project_id: str, entries: List[Dict]) -> str:
-        lines = [f"📢 组织项目 {project_id} 最近的卡片动态：\n"]
-        for i, entry in enumerate(entries, 1):
-            lines.append(f"  {i}. {entry.get('title')}")
-            
-            if entry.get("published"):
-                lines.append(f"     🕐 时间: {entry.get('published')}")
-                
-            for upd in entry.get("updates", []):
-                lines.append(f"     ➤ {upd}")
-            
-            if entry.get("state"):
-                lines.append(f"     📊 当前状态: {entry.get('state')}")
-                
-            # 加回提出者（发起人）展示
-            if entry.get("author"):
-                lines.append(f"     🙋 提出者: @{entry.get('author')}")
-
-            ass = entry.get("assignees") or []
-            if ass:
-                lines.append("     🔔 当前指派: " + " ".join([f"@{a}" for a in ass]))
-                
-            if entry.get("link"):
-                lines.append(f"     🔗 {entry.get('link')}")
-            lines.append("")
-        return "\n".join(lines)
-
-    # ==================== 订阅管理指令 ====================
-
-    async def _add_subscription(self, event: AstrMessageEvent, sub_type: str, *args):
-        """通用添加订阅逻辑"""
+    # ========================= 订阅管理指令 =========================
+    @filter.command("gh subscribe")
+    async def gh_subscribe(self, event: AstrMessageEvent):
+        """在当前会话订阅一个监听目标
+        用法:
+          gh subscribe <用户名>
+          gh subscribe <仓库名>[:issues|commits|releases]   # 默认 commits
+          gh subscribe <组织名>/<项目编号>
+        """
+        if not is_user_allowed(self, event):
+            yield event.plain_result("❌ 你没有权限使用此指令")
+            return
+        parts = event.message_str.strip().split(maxsplit=2)
+        if len(parts) < 2:
+            yield event.plain_result("❌ 用法错误，请提供监听目标")
+            return
+        target = parts[1].strip()
         session = get_session_id(event)
-        if sub_type == "repo":
-            if len(args) < 2:
-                yield event.plain_result("❌ 用法: ghp_subscribe repo <owner/repo> <issues|commits|releases>")
-                return
-            repo = args[0]
-            event_type = args[1].lower()
-            if not RE_REPO.match(repo):
+
+        # 判断类型
+        if RE_PROJECT_ITEM.match(target):
+            match = RE_PROJECT_ITEM.match(target)
+            org, num = match.group(1), int(match.group(2))
+            new_sub = {"type": "project", "org": org, "number": num}
+            display = f"项目 {org}/{num}"
+        elif "/" in target:
+            # 仓库可能带事件后缀
+            repo_part = target
+            event_type = "commits"
+            if ":" in target:
+                repo_part, event_type = target.split(":", 1)
+                if event_type not in ("issues", "commits", "releases"):
+                    yield event.plain_result("❌ 事件类型必须为 issues / commits / releases")
+                    return
+            if not RE_REPO.match(repo_part):
                 yield event.plain_result("❌ 仓库格式不正确，应为 owner/repo")
                 return
-            if event_type not in ("issues", "commits", "releases"):
-                yield event.plain_result("❌ 事件类型必须为 issues / commits / releases 之一")
-                return
-            for sub in self.subscriptions.get(session, []):
-                if sub.get("type") == "repo" and sub["repo"] == repo and sub["event"] == event_type:
-                    yield event.plain_result(f"⚠️ 当前会话已订阅 {repo} 的 {event_type} 动态")
-                    return
-            new_sub = {"type": "repo", "repo": repo, "event": event_type}
-        elif sub_type == "project":
-            if len(args) < 1:
-                yield event.plain_result("❌ 用法: ghp_subscribe project <org/number>")
-                return
-            proj_str = args[0]
-            match = RE_PROJECT_ITEM.match(proj_str)
-            if not match:
-                yield event.plain_result("❌ 项目格式不正确，应为 org/number，如 my-org/1")
-                return
-            org, num = match.group(1), int(match.group(2))
-            for sub in self.subscriptions.get(session, []):
-                if sub.get("type") == "project" and sub["org"] == org and sub["number"] == num:
-                    yield event.plain_result(f"⚠️ 当前会话已订阅项目 {org}/{num}")
-                    return
-            new_sub = {"type": "project", "org": org, "number": num}
+            new_sub = {"type": "repo", "repo": repo_part, "event": event_type}
+            display = f"仓库 {repo_part} 的 {event_type}"
         else:
-            yield event.plain_result("❌ 未知订阅类型")
-            return
+            if not RE_USER.match(target):
+                yield event.plain_result("❌ 用户名格式不正确")
+                return
+            new_sub = {"type": "user", "username": target}
+            display = f"用户 {target}"
+
+        # 检查重复
+        for sub in self.subscriptions.get(session, []):
+            if sub == new_sub:
+                yield event.plain_result(f"⚠️ 当前会话已订阅 {display}")
+                return
 
         if session not in self.subscriptions:
             self.subscriptions[session] = []
         self.subscriptions[session].append(new_sub)
         self._save_subscriptions()
         await self._init_subscription_cursor(session, new_sub)
-        yield event.plain_result(f"✅ 已成功订阅：{self._format_sub(new_sub)}")
+        yield event.plain_result(f"✅ 已成功订阅：{display}")
 
-    @filter.command("ghp_subscribe")
-    async def ghp_subscribe(self, event: AstrMessageEvent):
-        """订阅 GitHub 动态
-        用法:
-          ghp_subscribe repo <owner/repo> <issues|commits|releases>
-          ghp_subscribe project <org/number>
-        """
-        if not is_user_allowed(self, event):
-            yield event.plain_result("❌ 你没有权限使用此指令")
-            return
-        parts = event.message_str.strip().split()
-        if len(parts) < 3:
-            yield event.plain_result("❌ 用法错误，详见 /help ghp_subscribe")
-            return
-        sub_type = parts[1]
-        args = parts[2:]
-        async for result in self._add_subscription(event, sub_type, *args):
-            yield result
-
-    @filter.command("ghp_unsubscribe")
-    async def ghp_unsubscribe(self, event: AstrMessageEvent, index: int = None):
-        """取消订阅
-        用法: ghp_unsubscribe <序号>   (序号通过 ghp_list_subs 查看)
-        """
+    @filter.command("gh unsubscribe")
+    async def gh_unsubscribe(self, event: AstrMessageEvent, index: str = None):
+        """取消订阅，序号通过 gh list 查看"""
         if not is_user_allowed(self, event):
             yield event.plain_result("❌ 你没有权限使用此指令")
             return
@@ -1024,7 +730,7 @@ class GitHubPrivateListenPlugin(Star):
             msg = "📋 当前会话的订阅列表：\n"
             for i, sub in enumerate(items, 1):
                 msg += f"{i}. {self._format_sub(sub)}\n"
-            msg += "请使用 ghp_unsubscribe <序号> 取消对应的订阅"
+            msg += "请使用 gh unsubscribe <序号> 取消对应的订阅"
             yield event.plain_result(msg)
             return
 
@@ -1043,8 +749,8 @@ class GitHubPrivateListenPlugin(Star):
         except ValueError:
             yield event.plain_result("❌ 序号必须为数字")
 
-    @filter.command("ghp_list_subs")
-    async def ghp_list_subs(self, event: AstrMessageEvent):
+    @filter.command("gh list")
+    async def gh_list(self, event: AstrMessageEvent):
         """列出当前会话的所有订阅"""
         if not is_user_allowed(self, event):
             yield event.plain_result("❌ 你没有权限使用此指令")
@@ -1052,7 +758,7 @@ class GitHubPrivateListenPlugin(Star):
         session = get_session_id(event)
         items = self.subscriptions.get(session, [])
         if not items:
-            yield event.plain_result("当前会话没有任何订阅。使用 ghp_subscribe 添加订阅。")
+            yield event.plain_result("当前会话没有任何订阅。使用 gh subscribe 添加订阅。")
             return
         msg = "📋 当前会话的订阅列表：\n"
         for i, sub in enumerate(items, 1):
@@ -1060,123 +766,158 @@ class GitHubPrivateListenPlugin(Star):
         yield event.plain_result(msg)
 
     def _format_sub(self, sub: Dict) -> str:
-        if sub["type"] == "repo":
-            return f"仓库 {sub['repo']} 的 {sub['event']} 动态"
+        if sub["type"] == "user":
+            return f"用户 {sub['username']}"
+        elif sub["type"] == "repo":
+            return f"仓库 {sub['repo']} 的 {sub['event']}"
         else:
-            return f"项目 {sub['org']}/{sub['number']} 的卡片动态"
+            return f"项目 {sub['org']}/{sub['number']}"
 
-    @filter.command("ghp_pushnow")
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    async def ghp_pushnow(self, event: AstrMessageEvent):
-        """立即执行一次全局推送（检查所有会话的所有订阅）"""
+    @filter.command("gh pushnow")
+    async def gh_pushnow(self, event: AstrMessageEvent):
+        """立即推送当前会话所有订阅的最新动态"""
+        if not is_user_allowed(self, event):
+            yield event.plain_result("❌ 你没有权限使用此指令")
+            return
         if not self.github_token:
             yield event.plain_result("❌ 未配置 github_token，无法执行推送")
             return
-        yield event.plain_result("🔄 正在立即检查所有订阅并推送...")
-        try:
-            await self._do_poll()
-            yield event.plain_result("✅ 推送完成（如有新动态已发送）")
-        except Exception as e:
-            logger.error(f"[Private GitHub] 手动推送失败: {e}")
-            yield event.plain_result(f"❌ 推送过程中发生错误: {e}")
+        session = get_session_id(event)
+        items = self.subscriptions.get(session, [])
+        if not items:
+            yield event.plain_result("当前会话没有任何订阅，请先使用 gh subscribe 添加订阅。")
+            return
+        yield event.plain_result("🔄 正在检查并推送订阅动态...")
+        await self._do_push_for_session(session)
+        yield event.plain_result("✅ 推送完成（如有新动态已发送）")
 
-    @filter.command("ghp_check")
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    async def ghp_check(self, event: AstrMessageEvent):
-        """手动检查指定仓库或项目的最新动态（不推送，仅查看）
-        用法：
-          /ghp_check repo owner/repo issues|commits|releases
-          /ghp_check project org/number
+    async def _do_push_for_session(self, session: str):
+        """只检查指定会话的订阅并推送"""
+        items = self.subscriptions.get(session, [])
+        messages = []
+        for sub in items:
+            try:
+                last_cursor = await self._get_cursor(session, sub)
+                if not last_cursor or last_cursor == "__EMPTY__":
+                    continue
+                if sub["type"] == "user":
+                    new_entries, new_cursor = await self._fetch_new_user_entries(sub["username"], last_cursor)
+                elif sub["type"] == "repo":
+                    new_entries, new_cursor = await self._fetch_new_repo_entries(sub["repo"], sub["event"], last_cursor)
+                else:
+                    new_entries, new_cursor = await self._fetch_new_project_entries(sub["org"], sub["number"], last_cursor)
+
+                if new_entries:
+                    if sub["type"] == "user":
+                        msg = self._format_user_entries(sub["username"], new_entries)
+                    elif sub["type"] == "repo":
+                        msg = self._format_repo_entries(sub["repo"], sub["event"], new_entries)
+                    else:
+                        msg = self._format_project_entries(f"{sub['org']}/{sub['number']}", new_entries)
+                    if msg:
+                        messages.append(msg)
+                if new_cursor and new_cursor != last_cursor:
+                    await self._set_cursor(session, sub, new_cursor)
+            except Exception as e:
+                logger.error(f"[GitHubDynamics] 推送会话 {session} 订阅 {sub} 失败: {e}")
+        if messages:
+            full_msg = "\n\n".join(messages)
+            chain = MessageChain().message(full_msg)
+            try:
+                await self.context.send_message(session, chain)
+            except Exception as e:
+                logger.error(f"[GitHubDynamics] 推送到 {session} 失败: {e}")
+
+    @filter.command("gh check")
+    async def gh_check(self, event: AstrMessageEvent):
+        """立刻查询指定目标的最新动态（不添加订阅）
+        用法: 同 gh subscribe
         """
         if not is_user_allowed(self, event):
             yield event.plain_result("❌ 你没有权限使用此指令")
             return
-
-        parts = event.message_str.strip().split()
-        if len(parts) < 3:
-            yield event.plain_result(
-                "❌ 用法错误，示例：\n"
-                "  /ghp_check repo nju-mc-org/server_document issues\n"
-                "  /ghp_check project my-org/1"
-            )
+        parts = event.message_str.strip().split(maxsplit=2)
+        if len(parts) < 2:
+            yield event.plain_result("❌ 用法错误，请提供查询目标")
             return
+        target = parts[1].strip()
 
-        sub_type = parts[1].lower()
-        if sub_type == "repo":
-            if len(parts) < 4:
-                yield event.plain_result("用法: /ghp_check repo <owner/repo> <issues|commits|releases>")
-                return
-            repo = parts[2]
-            event_type = parts[3].lower()
-            if not RE_REPO.match(repo) or event_type not in ("issues", "commits", "releases"):
-                yield event.plain_result("❌ 仓库格式或事件类型错误")
-                return
-
-            yield event.plain_result(f"🔄 正在获取 {repo} 的 {event_type} 动态...")
-            url = self._build_repo_api_url(repo, event_type, per_page=self.max_entries or 10)
-            items = await self._rest_api_get(url)
-            if items is None:
-                yield event.plain_result("❌ 无法获取数据，请检查仓库名及 token 权限")
-                return
-
-            entries = []
-            for item in items[:self.max_entries or 10]:
-                entry = self._build_repo_entry_dict(item, event_type)
-                if entry:
-                    entries.append(entry)
-
-            if not entries:
-                yield event.plain_result(f"🔍 仓库 {repo} 暂无最近的 {event_type} 动态。")
-            else:
-                msg = self._format_single_check_repo(repo, event_type, entries)
-                yield event.plain_result(msg)
-
-        elif sub_type == "project":
-            if len(parts) < 3:
-                yield event.plain_result("用法: /ghp_check project <org/number>")
-                return
-            proj_str = parts[2]
-            match = RE_PROJECT_ITEM.match(proj_str)
-            if not match:
-                yield event.plain_result("❌ 项目格式错误，应为 org/number")
-                return
+        if RE_PROJECT_ITEM.match(target):
+            match = RE_PROJECT_ITEM.match(target)
             org, num = match.group(1), int(match.group(2))
-
-            yield event.plain_result(f"🔄 正在获取项目 {org}/{num} 的最新卡片...")
+            yield event.plain_result(f"🔄 正在查询项目 {org}/{num} ...")
             items = await self._fetch_project_items(org, num, first=self.max_entries or 10)
             if not items:
                 yield event.plain_result("❌ 无法获取项目数据，请检查组织名、项目编号及 token 权限")
                 return
-
             entries = []
             for item in items[:self.max_entries or 10]:
                 entry = self._build_project_entry_dict(item, org, num)
                 if entry:
                     entries.append(entry)
-
-            if not entries:
-                yield event.plain_result(f"🔍 项目 {org}/{num} 暂无最近的卡片动态。")
+            if entries:
+                yield event.plain_result(self._format_project_entries(f"{org}/{num}", entries))
             else:
-                msg = self._format_single_check_project(f"{org}/{num}", entries)
-                yield event.plain_result(msg)
+                yield event.plain_result(f"🔍 项目 {org}/{num} 暂无最近动态。")
+            return
 
+        if "/" in target:
+            repo_part = target
+            event_type = "commits"
+            if ":" in target:
+                repo_part, event_type = target.split(":", 1)
+                if event_type not in ("issues", "commits", "releases"):
+                    yield event.plain_result("❌ 事件类型必须为 issues / commits / releases")
+                    return
+            if not RE_REPO.match(repo_part):
+                yield event.plain_result("❌ 仓库格式不正确，应为 owner/repo")
+                return
+            yield event.plain_result(f"🔄 正在查询仓库 {repo_part} 的 {event_type} ...")
+            url = self._build_repo_api_url(repo_part, event_type, per_page=self.max_entries or 10)
+            items = await self._rest_api_get(url)
+            if not items:
+                yield event.plain_result("❌ 无法获取数据，请检查仓库名及 token 权限")
+                return
+            entries = []
+            for item in items[:self.max_entries or 10]:
+                entry = self._build_repo_entry_dict(item, event_type)
+                if entry:
+                    entries.append(entry)
+            if entries:
+                yield event.plain_result(self._format_repo_entries(repo_part, event_type, entries))
+            else:
+                yield event.plain_result(f"🔍 仓库 {repo_part} 暂无最近的 {event_type} 动态。")
+            return
+
+        # 用户
+        if not RE_USER.match(target):
+            yield event.plain_result("❌ 用户名格式不正确")
+            return
+        yield event.plain_result(f"🔄 正在查询用户 {target} 的最新动态...")
+        events = await self._fetch_user_events(target, per_page=self.max_entries or 10)
+        if not events:
+            yield event.plain_result(f"🔍 用户 {target} 暂无最近公开动态。")
+            return
+        entries = []
+        for ev in events[:self.max_entries or 10]:
+            entry = self._build_user_entry_dict(ev)
+            if entry:
+                entries.append(entry)
+        if entries:
+            yield event.plain_result(self._format_user_entries(target, entries))
         else:
-            yield event.plain_result("❌ 第二个参数必须是 repo 或 project")
+            yield event.plain_result(f"🔍 用户 {target} 暂无最近动态。")
 
-    # 兼容旧指令
-    @filter.command("ghp_list")
-    async def ghp_list(self, event: AstrMessageEvent):
-        """兼容旧指令，现在推荐使用 ghp_list_subs 查看本会话订阅"""
-        yield event.plain_result(
-            "💡 新版插件支持多会话独立订阅，请使用 ghp_list_subs 查看当前会话的订阅。"
-            "全局监听列表已废弃。"
-        )
-
-    @filter.command("ghp_bindhere")
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    async def ghp_bindhere(self, event: AstrMessageEvent):
-        yield event.plain_result(
-            "⚠️ 此指令已废弃。现在每个会话自动独立管理订阅，无需绑定。请使用订阅指令：\n"
-            "ghp_subscribe repo owner/repo issues\n"
-            "ghp_subscribe project org/number"
-        )
+    @filter.command("gh here")
+    async def gh_here(self, event: AstrMessageEvent):
+        """显示当前会话 ID 及订阅概况"""
+        session = get_session_id(event)
+        items = self.subscriptions.get(session, [])
+        if items:
+            msg = f"📌 当前会话已绑定 {len(items)} 个订阅。\n"
+            for i, sub in enumerate(items, 1):
+                msg += f"{i}. {self._format_sub(sub)}\n"
+            msg += "\n💡 使用 gh subscribe 添加订阅，gh unsubscribe 取消订阅。"
+        else:
+            msg = f"📌 当前会话 ID：`{session}`\n尚未订阅任何目标。使用 `gh subscribe` 添加监听。"
+        yield event.plain_result(msg)
