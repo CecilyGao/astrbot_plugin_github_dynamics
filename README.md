@@ -60,67 +60,67 @@
 
 提示：命令中的 <目标> 可以是用户登录名、仓库名（owner/repo，可加 :issues 等）、组织项目（org/number）。
 
-```json
+```
 示例：
-
 gh subscribe octocat
-
 gh subscribe microsoft/vscode:issues
-
 gh subscribe facebook/react
-
 gh subscribe my-org/5
 ```
 
 ## 工作流程
 
-用户在某个会话中通过 gh subscribe 添加监听目标，插件会立即初始化游标，记录该目标的“最新一条动态”。后台定时轮询（默认 1800 秒）所有会话的所有订阅，通过 GitHub API 获取新动态。发现新动态后，按订阅格式组装消息，推送到对应会话。用户也可手动使用 gh pushnow 强制立即推送当前会话。
+- 用户在某个会话中通过 gh subscribe 添加监听目标，插件会立即初始化游标，记录该目标的“最新一条动态”。
 
-使用 gh unsubscribe 可删除不再需要的订阅。
+- 后台定时轮询（默认 1800 秒）所有会话的所有订阅，通过 GitHub API 获取新动态。
+
+- 发现新动态后，按订阅格式组装消息，推送到对应会话。用户也可手动使用 gh pushnow 强制立即推送当前会话。
+
+- 使用 gh unsubscribe 可删除不再需要的订阅。
 
 ## 注意事项
 
-Token 权限：监听私有仓库需 token 包含 repo 范围；监听组织项目需 read:org；监听用户公开动态仅需 user（但一般 token 默认有基础权限）。
+- Token 权限：监听私有仓库需 token 包含 repo 范围；监听组织项目需 read:org；监听用户公开动态仅需 user（但一般 token 默认有基础权限）。
 
-API 速率限制：使用 Token 时每小时有 5000 次请求额度（普通用户为 60 次）。插件每次轮询会为每个订阅发起若干请求，请合理设置 poll_interval 避免超限。
+- API 速率限制：使用 Token 时每小时有 5000 次请求额度（普通用户为 60 次）。插件每次轮询会为每个订阅发起若干请求，请合理设置 poll_interval 避免超限。
 
-组织项目支持：仅支持 Project V2（即新版项目面板），不支持旧的 Projects (classic)。项目编号可在项目 URL 中看到（/org/projects/数字）。
+- 组织项目支持：仅支持 Project V2（即新版项目面板），不支持旧的 Projects (classic)。项目编号可在项目 URL 中看到（/org/projects/数字）。
 
-用户动态：只获取用户公开的事件。私有仓库事件需要 token 有相应权限且用户有访问权。
+- 用户动态：只获取用户公开的事件。私有仓库事件需要 token 有相应权限且用户有访问权。
 
-@ 提醒：需要在配置中开启 at_enable 并提供 username_qq 映射，否则推送消息中不会出现 @。
+- @ 提醒：需要在配置中开启 at_enable 并提供 username_qq 映射，否则推送消息中不会出现 @。
 
 ## 常见问题
 
-Q: 为什么我订阅了用户，但收不到他的任何动态？
+- 为什么我订阅了用户，但收不到他的任何动态？
 
-A: 请确认该用户最近有公开活动。如果是私有仓库的活动，需要 token 有 repo 权限且你的账户能访问该仓库。
+    请确认该用户最近有公开活动。如果是私有仓库的活动，需要 token 有 repo 权限且你的账户能访问该仓库。
 
-Q: 订阅仓库后，推送的内容包含大量旧数据？
 
-A: 首次订阅时会自动初始化游标，仅获取“最新一条动态”作为基准，后续只会推送新动态。如果仍出现问题，可删除订阅重新添加。
+- 订阅仓库后，推送的内容包含大量旧数据？
 
-Q: 如何获取组织项目的编号？
+    首次订阅时会自动初始化游标，仅获取“最新一条动态”作为基准，后续只会推送新动态。如果仍出现问题，可删除订阅重新添加。
 
-A: 打开项目板，浏览器地址栏类似 https://github.com/orgs/xxx/projects/5，最后的数字 5 就是项目编号。
 
-Q: 轮询间隔太短会不会触发 GitHub API 限流？
+- 如何获取组织项目的编号？
 
-A: 每个订阅每次轮询会请求 1 次（或少量分页）。建议至少 600 秒（10 分钟），默认 1800 秒（30 分钟）是安全的。
+    打开项目板，浏览器地址栏类似 https://github.com/orgs/xxx/projects/5，最后的数字 5 就是项目编号。
 
-Q: 我可以在多个群聊中订阅同一个目标吗？
 
-A: 可以。每个会话的订阅是独立的，互不影响。
+- 轮询间隔太短会不会触发 GitHub API 限流？
+
+    每个订阅每次轮询会请求 1 次（或少量分页）。建议至少 600 秒（10 分钟），默认 1800 秒（30 分钟）是安全的。
+
+
+- 我可以在多个群聊中订阅同一个目标吗？
+
+    可以。每个会话的订阅是独立的，互不影响。
 
 ## 开源协议
 MIT License © 2026 CecilyGao
 
 ## 致谢
 
-本插件融合了原 astrbot_plugin_private_github 与 astrbot_plugin_listen_github 的设计思想，感谢原作者的贡献。
+- 本插件融合了astrbot_plugin_private_github与astrbot_plugin_listen_github的设计，感谢原插件作者[aliveriver](https://github.com/aliveriver)与协作者[Kingcq](https://github.com/kingcxp)的贡献！
 
-原插件作者[aliveriver](https://github.com/aliveriver) 原插件链接：[https://github.com/aliveriver/astrbot_plugin_listen_github](https://github.com/aliveriver/astrbot_plugin_listen_github)
-
-协作者[Kingcq](https://github.com/kingcq)
-
-[Astrbot Team](https://github.com/AstrbotDev)
+- [Astrbot Team](https://github.com/AstrBotDevs/AstrBot)
