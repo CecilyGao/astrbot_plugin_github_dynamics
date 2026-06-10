@@ -4,7 +4,7 @@
 
 ---
 
-##  :two_hearts: 功能特性
+## ⚒ 功能特性
 
 - 👤 **用户动态**：监听指定 GitHub 用户的公开活动（Push、Issue、PR、Star、Fork 等）
 - 📦 **仓库动态**：监听仓库的 Issues、Commits、Releases
@@ -17,7 +17,7 @@
 
 ---
 
-##  :wrench: 安装与配置
+## ⌨️ 安装与配置
 
 ### 1. 安装插件
 
@@ -46,7 +46,7 @@
 ]
 ```
 
-##  :clipboard: 命令说明
+## 📋 命令说明
 所有命令均以 gh 开头，后跟空格分隔的子命令。可在群聊或私聊中使用。
 
 | 命令 | 用法 | 说明 |
@@ -68,7 +68,7 @@ gh subscribe facebook/react
 gh subscribe my-org/5
 ```
 
-##  :hourglass: 工作流程
+## ⌛ 工作流程
 
 - 用户在某个会话中通过 gh subscribe 添加监听目标，插件会立即初始化游标，记录该目标的“最新一条动态”。
 
@@ -78,7 +78,7 @@ gh subscribe my-org/5
 
 - 使用 gh unsubscribe 可删除不再需要的订阅。
 
-##  :bangbang: 注意事项
+## ‼️ 注意事项
 
 - Token 权限：监听私有仓库需 token 包含 repo 范围；监听组织项目需 read:org；监听用户公开动态仅需 user（但一般 token 默认有基础权限）。
 
@@ -90,7 +90,7 @@ gh subscribe my-org/5
 
 - @ 提醒：需要在配置中开启 at_enable 并提供 username_qq 映射，否则推送消息中不会出现 @。
 
-##  :interrobang: 常见问题
+## ⁉️ 常见问题
 
 - 为什么我订阅了用户，但收不到他的任何动态？
 
@@ -116,10 +116,10 @@ gh subscribe my-org/5
 
     可以。每个会话的订阅是独立的，互不影响。
 
-##  :file_folder: 开源协议
+## 📁 开源协议
 MIT License © 2026 CecilyGao
 
-##  :raising_hand: 致谢
+## 🙏 致谢
 
 - 本插件融合了astrbot_plugin_private_github与astrbot_plugin_listen_github的设计，感谢原插件作者[aliveriver](https://github.com/aliveriver)与协作者[Kingcq](https://github.com/kingcxp)的贡献！
 
