@@ -1,103 +1,126 @@
-# 🔐 GitHub 仓库动态监听插件
+# AstrBot GitHub Dynamics 插件
 
-通过 GitHub REST API 和 GraphQL API 定时获取仓库及组织项目（Projects v2）的动态，自动推送到绑定的聊天会话。支持 Personal Access Token 认证，可用于**公开仓库**（Public Repository）、**私有仓库**（Private Repository）以及项目动态（Projects）的实时监控。
+通过 GitHub API 监听用户动态、仓库动态（Issues/Commits/Releases）及组织项目动态，支持personal access token查询私有仓库，多会话独立订阅与定时推送。
 
-## ✨ 功能特性
+---
 
-- 📦 **仓库监听** — 支持 `Issues`、`Commits`、`Releases` 事件
-- 📌 **组织项目监听 (Projects v2)** — 自动检测项目中新增/更新的卡片（Issue / PR / Draft Issue）
-- 🔐 **Token 认证** — 使用 GitHub Personal Access Token 访问私有资源
-- ⏱️ **定时轮询** — 可自定义轮询间隔（默认 30 分钟，最低 60 秒）
-- 🌐 **多会话推送** — 支持绑定多个聊天会话
-- 🕐 **时区转换** — 自动将 GitHub 时间转为本地时区
-- 🗂️ **多会话独立订阅** — 每个群聊/私聊可独立添加/取消订阅，互不干扰
-- 🔒 **权限控制** — 可配置白名单，控制普通用户使用订阅指令
+## 功能特性
 
-## 📋 可用指令
+- 👤 **用户动态**：监听指定 GitHub 用户的公开活动（Push、Issue、PR、Star、Fork 等）
+- 📦 **仓库动态**：监听仓库的 Issues、Commits、Releases
+- 🏢 **组织项目**：监听 GitHub Project V2 的卡片更新（新建、内容变更等）
+- 🔒 **私有仓库支持**：使用 GitHub Personal Access Token 访问私有数据
+- 📢 **多会话独立订阅**：每个群聊/私聊可独立管理自己的订阅列表
+- ⏱️ **增量推送**：基于游标记录，只推送新动态，避免重复
+- 🔔 **@ 提醒**：可配置将 GitHub 用户名映射到 QQ 号，推送时 @ 相关人员
+- ⚙️ **灵活配置**：轮询间隔、最大推送条目、时区、白名单等均可自定义
 
-| 指令 | 权限 | 说明 |
-|------|------|------|
-| `ghp_check repo <owner/repo> <issues\|commits\|releases>` | 管理员 | 当前会话立即查看某仓库的最新动态 |
-| `ghp_check project <org/number>` | 管理员 | 当前会话立即查看某组织项目的最新卡片 |
-| `ghp_subscribe repo <owner/repo> <issues\|commits\|releases>` | 白名单成员或管理员 | 订阅仓库动态 |
-| `ghp_subscribe project <org/number>` | 同上 | 订阅组织项目卡片 |
-| `ghp_unsubscribe <序号>` | 同上 | 取消当前会话中指定序号的订阅 |
-| `ghp_list_subs` | 同上 | 列出当前会话的所有订阅 |
-| `ghp_pushnow` | 管理员 | 立即执行一次**全局**检查并推送**所有会话**的新动态 |
-| ~~`ghp_list`~~ | 所有人 | 已废弃，请用 `ghp_list_subs` |
-| ~~`ghp_bindhere`~~ | 管理员 | 已废弃，现在每个会话自动独立管理 |
+---
 
-### 指令示例
+## 安装与配置
 
-```
-ghp_check repo AstrBotDevs/AstrBot issues
-ghp_subscribe repo AstrBotDevs/AstrBot commits
-ghp_check project AstrBotDevs/1
-ghp_subscribe project AstrBotDevs/3
-```
+### 1. 安装插件
 
-## ⚙️ 配置项
+将插件文件夹 `astrbot_plugin_github_dynamics` 放入 AstrBot 的 `addons` 目录，然后重启 AstrBot 或通过 WebUI 重载插件。
 
-在 AstrBot WebUI 插件配置页面可设置：
+### 2. 配置文件
+
+在 AstrBot WebUI 中配置以下参数（或手动编辑 `data/star/astrbot_plugin_github_dynamics/_conf_schema.json` 对应项）：
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
-| `github_token` | string | 空 | GitHub Personal Access Token，需具有 `repo`、`read:org`、`project` 权限 |
-| `poll_interval` | int | 1800 | 轮询间隔（秒），建议不低于 600 秒 |
-| `max_entries` | int | 5 | 每次推送的最大条目数，设为 0 不限制 |
-| `timezone` | string | Asia/Shanghai | 时间显示时区 |
-| `whitelist` | list | [] | 允许使用订阅指令的普通用户 ID 列表，留空则所有用户均可使用（不建议） |
+| `github_token` | string | (空) | **必填**。GitHub Personal Access Token，需具有 `repo`、`read:org`、`user` 权限。 |
+| `poll_interval` | int | 1800 | 轮询间隔（秒），建议不低于 600。 |
+| `max_entries` | int | 5 | 每次推送每个订阅项最多显示的新动态条数，0 为不限制。 |
+| `timezone` | string | `Asia/Shanghai` | 显示动态时间所用的时区。 |
+| `at_enable` | bool | `false` | 是否在推送消息中 @ 对应的 QQ 号。 |
+| `username_qq` | list | `[]` | GitHub 用户名与 QQ 号的映射列表，格式见下方示例。 |
+| `whitelist` | list | `[]` | 允许使用订阅命令的用户 ID 列表，为空则所有用户可用。 |
 
-### 配置示例
+#### `username_qq` 示例
 
 ```json
-{
-    "github_token": "ghp_1145141919810",
-    "poll_interval": 900,
-    "max_entries": 5,
-    "timezone": "Asia/Shanghai",
-    "whitelist": []
-}
+[
+  { "username": "octocat", "qq": "123456789" },
+  { "username": "torvalds", "qq": "987654321" }
+]
 ```
 
-> **注意**：`watch_repos`、`watch_org_projects`、`bound_sessions` 等旧配置项已废弃，请使用指令进行会话级订阅。
+## 命令说明
+所有命令均以 gh 开头，后跟空格分隔的子命令。可在群聊或私聊中使用。
 
-## 📦 升级指南（从 v1.0.0 升级）
+| 命令 | 用法 | 说明 |
+|------|------|------|
+| `gh subscribe` | `gh subscribe <用户名>`<br>`gh subscribe <仓库名>[:issues\|commits\|releases]`<br>`gh subscribe <组织名>/<项目编号>` | 在当前会话添加一个监听目标。<br>仓库事件默认为 `commits`。<br>组织项目编号可在项目 URL 中找到（如 `org/1`）。 |
+| `gh unsubscribe` | `gh unsubscribe <序号>` | 取消当前会话中的某个订阅。序号通过 `gh list` 查看。 |
+| `gh list` | `gh list` | 列出当前会话的所有订阅及其序号。 |
+| `gh pushnow` | `gh pushnow` | 立即检查当前会话所有订阅的新动态并推送（不等待轮询）。 |
+| `gh check` | `gh check <目标>` | 临时查询指定目标的最新动态（不添加订阅），语法同 `gh subscribe`。 |
+| `gh here` | `gh here` | 显示当前会话的 ID 以及已有的订阅数量/列表。 |
 
-1. **备份原配置与原订阅列表**（可选）
-2. **更新本插件**
-3. **重新添加订阅**：在每个需要推送的会话中重新使用 `/ghp_subscribe` 添加订阅
+提示：命令中的 <目标> 可以是用户登录名、仓库名（owner/repo，可加 :issues 等）、组织项目（org/number）。
 
-> 旧版绑定的会话和监听项不会自动迁移，请手动重新订阅。
+```json
+示例：
 
-## 👥 贡献指南
+gh subscribe octocat
 
-- 🌟 Star 这个项目！（点右上角的星星，感谢支持！）
-- 🐛 提交 Issue 报告问题
-- 💡 提出新功能建议
-- 🔧 提交 Pull Request 改进代码
+gh subscribe microsoft/vscode:issues
 
-## 🙏 致谢
+gh subscribe facebook/react
 
-- 感谢 [astrbot_plugin_listen_github](https://github.com/aliveriver/astrbot_plugin_listen_github) 插件，为本项目提供了架构参考和灵感。
-- 感谢 [reminder](https://github.com/Soulter/astrbot_plugin_reminder) 插件的设计思路与架构启发，为本插件的多会话订阅管理提供了重要参考。
+gh subscribe my-org/5
+```
 
-## ⚠️ 注意事项
+## 工作流程
 
-1. **Token 权限要求**：Personal Access Token 必须勾选 `repo`（完全控制私有仓库）、`read:org`（读取组织信息）和 `project`（访问项目）。如果组织启用了 SAML SSO，需要先授权该 Token。
+用户在某个会话中通过 gh subscribe 添加监听目标，插件会立即初始化游标，记录该目标的“最新一条动态”。后台定时轮询（默认 1800 秒）所有会话的所有订阅，通过 GitHub API 获取新动态。发现新动态后，按订阅格式组装消息，推送到对应会话。用户也可手动使用 gh pushnow 强制立即推送当前会话。
 
-   验证 Token 是否有效（示例）：  
-   ```bash
-   curl -H "Authorization: token ghp_1145141919810" "https://api.github.com/repos/xxxx/xxxxxx/issues"
-   ```
-   若返回正常的 issues 列表，则说明该 Token 具备相应访问权限。
+使用 gh unsubscribe 可删除不再需要的订阅。
 
-2. **项目编号获取**：组织项目的编号请在浏览器地址栏查看，例如 `https://github.com/orgs/xxxx/projects/4` 中的 `4` 即为项目编号。配置时写入 `xxxx/4`。
+## 注意事项
 
-3. **API 限流**：GitHub REST API 的 Token 限频为每小时 5000 次请求，GraphQL 节点数也有一定限制。插件内置了扫描窗口上限（`MAX_SCAN_ENTRIES = 50`），避免单次轮询请求过多。建议轮询间隔不要低于 600 秒（10 分钟）。
+Token 权限：监听私有仓库需 token 包含 repo 范围；监听组织项目需 read:org；监听用户公开动态仅需 user（但一般 token 默认有基础权限）。
 
-4. **项目卡片更新检测**：插件通过比较项目的 `updatedAt` 时间戳来判断是否有新卡片，仅推送新增或最近更新的项目卡片。目前未支持监听卡片内字段值的变更（如状态从“待办”变为“进行中”）。
+API 速率限制：使用 Token 时每小时有 5000 次请求额度（普通用户为 60 次）。插件每次轮询会为每个订阅发起若干请求，请合理设置 poll_interval 避免超限。
 
-5. **Draft Issue 链接**：GitHub GraphQL API 中的 Draft Issue 没有 `url` 字段，因此推送时不会附带链接，需要用户直接在项目网页中查看。
+组织项目支持：仅支持 Project V2（即新版项目面板），不支持旧的 Projects (classic)。项目编号可在项目 URL 中看到（/org/projects/数字）。
 
-6. **合法合规使用**：请确保使用本插件遵守 GitHub 服务条款及适用的法律法规。不得有利用本插件对其他用户造成侵权、对 GitHub API 进行高频请求或任何可能对 GitHub 服务造成压力的行为。用户应自行承担因滥用产生的责任。
+用户动态：只获取用户公开的事件。私有仓库事件需要 token 有相应权限且用户有访问权。
+
+@ 提醒：需要在配置中开启 at_enable 并提供 username_qq 映射，否则推送消息中不会出现 @。
+
+## 常见问题
+
+Q: 为什么我订阅了用户，但收不到他的任何动态？
+
+A: 请确认该用户最近有公开活动。如果是私有仓库的活动，需要 token 有 repo 权限且你的账户能访问该仓库。
+
+Q: 订阅仓库后，推送的内容包含大量旧数据？
+
+A: 首次订阅时会自动初始化游标，仅获取“最新一条动态”作为基准，后续只会推送新动态。如果仍出现问题，可删除订阅重新添加。
+
+Q: 如何获取组织项目的编号？
+
+A: 打开项目板，浏览器地址栏类似 https://github.com/orgs/xxx/projects/5，最后的数字 5 就是项目编号。
+
+Q: 轮询间隔太短会不会触发 GitHub API 限流？
+
+A: 每个订阅每次轮询会请求 1 次（或少量分页）。建议至少 600 秒（10 分钟），默认 1800 秒（30 分钟）是安全的。
+
+Q: 我可以在多个群聊中订阅同一个目标吗？
+
+A: 可以。每个会话的订阅是独立的，互不影响。
+
+## 开源协议
+MIT License © 2026 CecilyGao
+
+## 致谢
+
+本插件融合了原 astrbot_plugin_private_github 与 astrbot_plugin_listen_github 的设计思想，感谢原作者的贡献。
+
+原插件作者[aliveriver](https://github.com/aliveriver) 原插件链接：[https://github.com/aliveriver/astrbot_plugin_listen_github](https://github.com/aliveriver/astrbot_plugin_listen_github)
+
+协作者[Kingcq](https://github.com/kingcq)
+
+[Astrbot Team](https://github.com/AstrbotDev)
