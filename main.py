@@ -11,8 +11,7 @@ except ImportError:
     from backports.zoneinfo import ZoneInfo
 
 import aiohttp
-from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.message import MessageChain
+from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api import logger, AstrBotConfig
 
