@@ -51,11 +51,11 @@
 
 | 命令 | 用法 | 说明 |
 |------|------|------|
-| `gh subscribe` | `gh subscribe <用户名>`<br>`gh subscribe <仓库名>[:issues\|commits\|releases]`<br>`gh subscribe <组织名>/<项目编号>` | 在当前会话添加一个监听目标。<br>仓库事件默认为 `commits`。<br>组织项目编号可在项目 URL 中找到（如 `org/1`）。 |
-| `gh unsubscribe` | `gh unsubscribe <序号>` | 取消当前会话中的某个订阅。序号通过 `gh list` 查看。 |
+| `gh subscribe` | `gh subscribe 用户名`<br>`gh subscribe 仓库名:事件类型`<br>`gh subscribe 组织名/项目编号` | 在当前会话添加一个监听目标。<br>仓库事件类型可选：issues、commits、releases，多个用逗号分隔，默认为 commits。<br>组织项目编号可在项目 URL 中看到（如 org/5）。 |
+| `gh unsubscribe` | `gh unsubscribe 序号` | 取消当前会话中的某个订阅。序号通过 `gh list` 查看。 |
 | `gh list` | `gh list` | 列出当前会话的所有订阅及其序号。 |
 | `gh pushnow` | `gh pushnow` | 立即检查当前会话所有订阅的新动态并推送（不等待轮询）。 |
-| `gh check` | `gh check <目标>` | 临时查询指定目标的最新动态（不添加订阅），语法同 `gh subscribe`。 |
+| `gh check` | `gh check 目标` | 临时查询指定目标的最新动态（不添加订阅），目标语法同 `gh subscribe`。 |
 | `gh here` | `gh here` | 显示当前会话的 ID 以及已有的订阅数量/列表。 |
 
 提示：命令中的 <目标> 可以是用户登录名、仓库名（owner/repo，可加 :issues 等）、组织项目（org/number）。
@@ -64,6 +64,7 @@
 示例：
 gh subscribe octocat
 gh subscribe microsoft/vscode:issues
+gh subscribe microsoft/vscode:issues,releases
 gh subscribe facebook/react
 gh subscribe my-org/5
 ```
