@@ -57,7 +57,7 @@ def get_group_id_from_session(session: str) -> str:
     "astrbot_plugin_github_dynamics",
     "CecilyGao",
     "通过 GitHub API 监听用户动态、仓库(Issues/Commits/Releases)及组织项目动态，支持私有仓库，多会话独立订阅与定时推送",
-    "0.2.0",
+    "0.0.1",
     "https://github.com/CecilyGao/astrbot_plugin_github_dynamics",
 )
 class GitHubDynamicsPlugin(Star):
@@ -74,7 +74,7 @@ class GitHubDynamicsPlugin(Star):
         self.at_enable: bool = config.get("at_enable", False)
         self.whitelist: List[str] = config.get("whitelist", [])
 
-        # 用户名 -> QQ 映射
+        # 用户名 -> QQ 映射（仅支持字符串列表格式）
         self.username_qq_map: Dict[str, str] = self._load_username_qq_map()
 
         # 订阅数据结构：{ session: [ {type, ...}, ... ] }
@@ -85,6 +85,33 @@ class GitHubDynamicsPlugin(Star):
 
         # 从配置文件加载订阅
         self._load_subscriptions_from_config()
+
+    # ========================= 用户名-QQ 映射（仅支持字符串列表） =========================
+    def _load_username_qq_map(self) -> Dict[str, str]:
+        """从配置加载 username_qq，仅支持字符串列表格式 ["username:qq", ...]"""
+        raw = self.config.get("username_qq", [])
+        if not isinstance(raw, list):
+            logger.warning("[GitHubDynamics] username_qq 配置格式错误，应为字符串列表，已忽略")
+            return {}
+        mapping = {}
+        for item in raw:
+            if not isinstance(item, str):
+                logger.warning(f"[GitHubDynamics] username_qq 列表项不是字符串，已忽略: {item}")
+                continue
+            parts = item.split(":", 1)
+            if len(parts) != 2:
+                logger.warning(f"[GitHubDynamics] username_qq 格式错误，应为 '用户名:QQ号'，已忽略: {item}")
+                continue
+            username = parts[0].strip()
+            qq = parts[1].strip()
+            if username and qq:
+                mapping[username.lower()] = qq
+        return mapping
+
+    def _resolve_qq_for_username(self, username: str) -> Optional[str]:
+        if not username:
+            return None
+        return self.username_qq_map.get(username.strip().lower())
 
     # ========================= 数据持久化（配置文件） =========================
     def _load_subscriptions_from_config(self):
@@ -98,7 +125,6 @@ class GitHubDynamicsPlugin(Star):
                 item.pop("__template_key", None)
             group_id = str(item.get("group_id", "")).strip()
             if not group_id:
-                # 私聊：使用固定标识 private 不够精确，但为了兼容，我们使用 "private"
                 session = "private"
             else:
                 session = group_id
@@ -110,10 +136,8 @@ class GitHubDynamicsPlugin(Star):
 
     def _config_item_to_sub(self, item: dict) -> Optional[dict]:
         """将配置项转换为内存中的订阅字典"""
-        # 用户订阅
         if item.get("user_id"):
             return {"type": "user", "username": item["user_id"]}
-        # 仓库订阅
         if item.get("repo_id"):
             events = []
             if item.get("issues_enabled", False):
@@ -129,7 +153,6 @@ class GitHubDynamicsPlugin(Star):
                 "repo": item["repo_id"],
                 "events": events,
             }
-        # 项目订阅
         if item.get("organization_id") and item.get("project_id"):
             return {
                 "type": "project",
@@ -185,7 +208,6 @@ class GitHubDynamicsPlugin(Star):
         await self.put_kv_data(key, cursor)
 
     async def _init_subscription_cursor(self, session: str, sub: Dict):
-        """初始化订阅的游标（基于最新一条动态）"""
         try:
             if sub["type"] == "user":
                 latest = await self._fetch_latest_user_event(sub["username"])
@@ -274,31 +296,6 @@ class GitHubDynamicsPlugin(Star):
             return dt.astimezone(ZoneInfo(self.cfg_timezone)).strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
             return time_str
-
-    def _load_username_qq_map(self) -> Dict[str, str]:
-        raw = self.config.get("username_qq", []) or []
-        if isinstance(raw, str):
-            try:
-                raw = json.loads(raw)
-            except Exception:
-                pass
-        mapping = {}
-        if isinstance(raw, dict):
-            for k, v in raw.items():
-                mapping[str(k).strip().lower()] = str(v).strip()
-        elif isinstance(raw, list):
-            for item in raw:
-                if isinstance(item, dict):
-                    username = item.get("username") or item.get("login")
-                    qq = item.get("qq")
-                    if username and qq:
-                        mapping[str(username).strip().lower()] = str(qq).strip()
-        return mapping
-
-    def _resolve_qq_for_username(self, username: str) -> Optional[str]:
-        if not username:
-            return None
-        return self.username_qq_map.get(username.strip().lower())
 
     # ========================= GitHub API 请求 =========================
     async def _rest_api_get(self, url: str) -> Optional[List[Dict]]:
@@ -430,7 +427,7 @@ class GitHubDynamicsPlugin(Star):
             "author": username,
         }
 
-    # ========================= 仓库动态（支持多事件类型） =========================
+    # ========================= 仓库动态 =========================
     async def _fetch_latest_repo_entry(self, repo: str, event_type: str) -> Optional[Dict]:
         url = self._build_repo_api_url(repo, event_type, per_page=1)
         data = await self._rest_api_get(url)
@@ -742,17 +739,11 @@ class GitHubDynamicsPlugin(Star):
             return
         session = get_session_id(event)
 
-        # 解析 target
-        sub = None
-        display = ""
-
-        # 项目格式：org/number
         if RE_PROJECT_ITEM.match(target):
             match = RE_PROJECT_ITEM.match(target)
             org, num = match.group(1), int(match.group(2))
             sub = {"type": "project", "org": org, "number": num}
             display = f"项目 {org}/{num}"
-        # 仓库格式：owner/repo 或 owner/repo:issues,commits,releases
         elif "/" in target:
             repo_part = target
             events_part = "commits"
@@ -761,7 +752,6 @@ class GitHubDynamicsPlugin(Star):
             if not RE_REPO.match(repo_part):
                 yield event.plain_result("❌ 仓库格式不正确，应为 owner/repo")
                 return
-            # 解析事件类型
             event_list = [e.strip().lower() for e in events_part.split(",") if e.strip()]
             events = {"issues": False, "commits": False, "releases": False}
             for e in event_list:
@@ -770,7 +760,6 @@ class GitHubDynamicsPlugin(Star):
                 else:
                     yield event.plain_result(f"❌ 无效的事件类型: {e}，可选: issues, commits, releases")
                     return
-            # 若没有任何事件被启用，默认 commits
             if not any(events.values()):
                 events["commits"] = True
             sub = {
@@ -780,14 +769,12 @@ class GitHubDynamicsPlugin(Star):
             }
             display = f"仓库 {repo_part} 的 {', '.join(sub['events'])}"
         else:
-            # 用户
             if not RE_USER.match(target):
                 yield event.plain_result("❌ 用户名格式不正确")
                 return
             sub = {"type": "user", "username": target}
             display = f"用户 {target}"
 
-        # 检查重复
         for existing in self.subscriptions.get(session, []):
             if existing == sub:
                 yield event.plain_result(f"⚠️ 当前会话已订阅 {display}")
@@ -827,7 +814,6 @@ class GitHubDynamicsPlugin(Star):
             if not items:
                 del self.subscriptions[session]
             self._sync_subscriptions_to_config()
-            # 删除相关游标（可选，保留也行）
             yield event.plain_result(f"✅ 已取消订阅：{self._format_sub(removed)}")
         except ValueError:
             yield event.plain_result("❌ 序号必须为数字")
@@ -863,7 +849,6 @@ class GitHubDynamicsPlugin(Star):
         yield event.plain_result("✅ 推送完成（如有新动态已发送）")
 
     async def _do_push_for_session(self, session: str):
-        """立即检查指定会话的订阅并推送"""
         items = self.subscriptions.get(session, [])
         messages = []
         for sub in items:
@@ -918,12 +903,10 @@ class GitHubDynamicsPlugin(Star):
                 logger.error(f"[GitHubDynamics] 推送到 {session} 失败: {e}")
 
     async def _cmd_check(self, event: AstrMessageEvent, target: str):
-        """立即查询指定目标的最新动态（不添加订阅）"""
         if not is_user_allowed(self, event):
             yield event.plain_result("❌ 你没有权限使用此指令")
             return
 
-        # 项目
         if RE_PROJECT_ITEM.match(target):
             match = RE_PROJECT_ITEM.match(target)
             org, num = match.group(1), int(match.group(2))
@@ -943,7 +926,6 @@ class GitHubDynamicsPlugin(Star):
                 yield event.plain_result(f"🔍 项目 {org}/{num} 暂无最近动态。")
             return
 
-        # 仓库
         if "/" in target:
             repo_part = target
             events_part = "commits"
@@ -982,7 +964,6 @@ class GitHubDynamicsPlugin(Star):
                 yield event.plain_result(f"🔍 仓库 {repo_part} 暂无最近的动态。")
             return
 
-        # 用户
         if not RE_USER.match(target):
             yield event.plain_result("❌ 用户名格式不正确")
             return
@@ -1018,7 +999,7 @@ class GitHubDynamicsPlugin(Star):
 
     async def _cmd_help(self, event: AstrMessageEvent):
         help_text = (
-            "📦 GitHub Dynamics 插件 v0.2.0\n"
+            "📦 GitHub Dynamics 插件 v0.0.1\n"
             "命令格式：gh <子命令> [参数]\n\n"
             "可用子命令：\n"
             "  subscribe <目标>         - 订阅目标\n"
