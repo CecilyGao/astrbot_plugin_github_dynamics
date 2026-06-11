@@ -3,7 +3,7 @@
     "description": "GitHub Personal Access Token",
     "type": "string",
     "default": "",
-    "hint": "用于访问私有仓库和组织项目，格式 ghp_xxxxxxxxxxxx，需具有 repo、read:org、user 权限"
+    "hint": "用于访问私有仓库和组织项目，格式 ghp_xxxxxxxxxxxx，需具有对应仓库/组织的 repo、read:org、user 权限"
   },
   "poll_interval": {
     "description": "轮询间隔（秒）",
