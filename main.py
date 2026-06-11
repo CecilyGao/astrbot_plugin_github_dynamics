@@ -113,32 +113,39 @@ class GitHubDynamicsPlugin(Star):
             return None
         return self.username_qq_map.get(username.strip().lower())
 
-    # ========================= 数据持久化（配置文件） =========================
+    # ========================= 数据持久化（多模板配置文件） =========================
     def _load_subscriptions_from_config(self):
-        """从插件配置文件的 subscriptions 字段加载订阅数据（template_list 格式）"""
+        """从插件配置文件的 subscriptions 字段加载订阅数据（支持多模板）"""
         raw_list = self.config.get("subscriptions", [])
         if not isinstance(raw_list, list):
             raw_list = []
         new_subs = {}
         for item in raw_list:
-            if "__template_key" in item:
-                item.pop("__template_key", None)
+            template_key = item.get("__template_key", "")
             group_id = str(item.get("group_id", "")).strip()
             if not group_id:
                 session = "private"
             else:
                 session = group_id
-            sub = self._config_item_to_sub(item)
+            sub = self._config_item_to_sub(item, template_key)
             if sub:
                 new_subs.setdefault(session, []).append(sub)
         self.subscriptions = new_subs
         logger.info(f"[GitHubDynamics] 从配置文件加载了 {len(self.subscriptions)} 个会话的订阅")
 
-    def _config_item_to_sub(self, item: dict) -> Optional[dict]:
-        """将配置项转换为内存中的订阅字典"""
-        if item.get("user_id"):
-            return {"type": "user", "username": item["user_id"]}
-        if item.get("repo_id"):
+    def _config_item_to_sub(self, item: dict, template_key: str = "") -> Optional[dict]:
+        """根据模板类型和字段将配置项转换为内存中的订阅字典"""
+        if template_key == "user_subscription" or (not template_key and item.get("user_id")):
+            # 用户订阅
+            user_id = item.get("user_id")
+            if not user_id:
+                return None
+            return {"type": "user", "username": user_id}
+        elif template_key == "repo_subscription" or (not template_key and item.get("repo_id")):
+            # 仓库订阅
+            repo_id = item.get("repo_id")
+            if not repo_id:
+                return None
             events = []
             if item.get("issues_enabled", False):
                 events.append("issues")
@@ -148,34 +155,43 @@ class GitHubDynamicsPlugin(Star):
                 events.append("releases")
             if not events:
                 events = ["commits"]
-            return {
-                "type": "repo",
-                "repo": item["repo_id"],
-                "events": events,
-            }
-        if item.get("organization_id") and item.get("project_id"):
-            return {
-                "type": "project",
-                "org": item["organization_id"],
-                "number": int(item["project_id"]),
-            }
-        return None
+            return {"type": "repo", "repo": repo_id, "events": events}
+        elif template_key == "project_subscription" or (not template_key and item.get("organization_id") and item.get("project_id")):
+            # 项目订阅
+            org = item.get("organization_id")
+            proj = item.get("project_id")
+            if not org or not proj:
+                return None
+            return {"type": "project", "org": org, "number": int(proj)}
+        else:
+            return None
 
     def _sub_to_config_item(self, sub: dict, session: str) -> dict:
-        """将内存中的订阅项转换为配置项格式"""
+        """将内存中的订阅项转换为配置项格式（带模板键）"""
         group_id = get_group_id_from_session(session)
-        base = {"group_id": group_id}
         if sub["type"] == "user":
-            base["user_id"] = sub["username"]
+            return {
+                "__template_key": "user_subscription",
+                "group_id": group_id,
+                "user_id": sub["username"]
+            }
         elif sub["type"] == "repo":
-            base["repo_id"] = sub["repo"]
-            base["issues_enabled"] = "issues" in sub["events"]
-            base["commits_enabled"] = "commits" in sub["events"]
-            base["releases_enabled"] = "releases" in sub["events"]
+            return {
+                "__template_key": "repo_subscription",
+                "group_id": group_id,
+                "repo_id": sub["repo"],
+                "issues_enabled": "issues" in sub["events"],
+                "commits_enabled": "commits" in sub["events"],
+                "releases_enabled": "releases" in sub["events"]
+            }
         elif sub["type"] == "project":
-            base["organization_id"] = sub["org"]
-            base["project_id"] = str(sub["number"])
-        return base
+            return {
+                "__template_key": "project_subscription",
+                "group_id": group_id,
+                "organization_id": sub["org"],
+                "project_id": str(sub["number"])
+            }
+        return {}
 
     def _sync_subscriptions_to_config(self):
         """将当前 self.subscriptions 同步到插件的配置文件中"""
@@ -739,11 +755,17 @@ class GitHubDynamicsPlugin(Star):
             return
         session = get_session_id(event)
 
+        # 解析 target
+        sub = None
+        display = ""
+
+        # 项目格式：org/number
         if RE_PROJECT_ITEM.match(target):
             match = RE_PROJECT_ITEM.match(target)
             org, num = match.group(1), int(match.group(2))
             sub = {"type": "project", "org": org, "number": num}
             display = f"项目 {org}/{num}"
+        # 仓库格式：owner/repo 或 owner/repo:issues,commits,releases
         elif "/" in target:
             repo_part = target
             events_part = "commits"
@@ -769,12 +791,14 @@ class GitHubDynamicsPlugin(Star):
             }
             display = f"仓库 {repo_part} 的 {', '.join(sub['events'])}"
         else:
+            # 用户
             if not RE_USER.match(target):
                 yield event.plain_result("❌ 用户名格式不正确")
                 return
             sub = {"type": "user", "username": target}
             display = f"用户 {target}"
 
+        # 检查重复
         for existing in self.subscriptions.get(session, []):
             if existing == sub:
                 yield event.plain_result(f"⚠️ 当前会话已订阅 {display}")
