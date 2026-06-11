@@ -25,16 +25,14 @@
   },
   "username_qq": {
     "type": "list",
-    "description": "GitHub 用户名与 QQ 号映射",
+    "description": "GitHub 用户名与 QQ 号映射（字符串列表格式）",
     "items": {
-      "type": "object",
-      "properties": {
-        "username": { "type": "string", "description": "GitHub 用户名" },
-        "qq": { "type": "string", "description": "QQ 号" }
-      }
+      "type": "string",
+      "pattern": "^[^:]+:.+$",
+      "description": "格式：用户名:QQ号，例如 CecilyGao:1527519027"
     },
     "default": [],
-    "hint": "用于在推送消息中 @ 对应的 QQ 号，例如 [{ \"username\": \"octocat\", \"qq\": \"123456789\" }]"
+    "hint": "例：[\"CecilyGao:1527519027\", \"octocat:123456789\"]"
   },
   "at_enable": {
     "type": "bool",
