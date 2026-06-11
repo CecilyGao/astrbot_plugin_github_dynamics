@@ -21,7 +21,7 @@
     "description": "时区",
     "type": "string",
     "default": "Asia/Shanghai",
-    "hint": "用于将 GitHub 动态的时间转换为本地时间，例如 Asia/Shanghai、America/New_York、Europe/London"
+    "hint": "用于将 GitHub 动态的时间转换为本地时间，例如 Asia/Shanghai"
   },
   "username_qq": {
     "type": "list",
@@ -48,29 +48,42 @@
   },
   "subscriptions": {
     "description": "GitHub 订阅配置列表（可动态添加）",
-    "hint": "每个元素表示一个订阅目标，通过命令 gh subscribe 动态添加/删除，无需手动编辑。支持群聊独立订阅。",
+    "hint": "通过命令 gh subscribe 动态添加/删除，也可手动编辑。支持群聊独立订阅。",
     "type": "template_list",
     "default": [],
     "templates": {
-      "github_subscription": {
-        "name": "GitHub 订阅规则",
+      "user_subscription": {
+        "name": "用户订阅",
+        "description": "订阅目标 GitHub 用户的动态",
         "items": {
           "group_id": {
             "type": "string",
             "description": "群号",
-            "hint": "私聊时此项可为空或特殊标识",
+            "hint": "群聊时填群号，私聊留空",
             "default": ""
           },
           "user_id": {
             "type": "string",
-            "description": "订阅的 GitHub 用户名",
-            "hint": "与 repo_id、organization_id 三选一",
+            "description": "GitHub 用户名",
+            "hint": "例如：CecilyGao",
+            "default": ""
+          }
+        }
+      },
+      "repo_subscription": {
+        "name": "仓库订阅",
+        "description": "订阅目标 GitHub 仓库的动态",
+        "items": {
+          "group_id": {
+            "type": "string",
+            "description": "群号",
+            "hint": "群聊时填群号，私聊留空",
             "default": ""
           },
           "repo_id": {
             "type": "string",
-            "description": "订阅的仓库名（格式：owner/repo）",
-            "hint": "与 user_id、organization_id 三选一",
+            "description": "仓库名",
+            "hint": "格式：owner/repo 例如：CecilyGao/astrbot_plugin_github_dynamics",
             "default": ""
           },
           "issues_enabled": {
@@ -81,23 +94,35 @@
           "commits_enabled": {
             "type": "bool",
             "description": "监听 Commits",
-            "default": true
+            "default": false
           },
           "releases_enabled": {
             "type": "bool",
             "description": "监听 Releases",
             "default": false
+          }
+        }
+      },
+      "project_subscription": {
+        "name": "组织项目订阅",
+        "description": "订阅 GitHub 组织下的 Projects V2 项目动态",
+        "items": {
+          "group_id": {
+            "type": "string",
+            "description": "群号",
+            "hint": "群聊时填群号，私聊留空",
+            "default": ""
           },
           "organization_id": {
             "type": "string",
-            "description": "订阅的组织名",
-            "hint": "与 user_id、repo_id 三选一，需配合 project_id",
+            "description": "组织名",
+            "hint": "例如：facebook",
             "default": ""
           },
           "project_id": {
             "type": "string",
-            "description": "订阅的项目编号（数字）",
-            "hint": "与 organization_id 配合使用",
+            "description": "项目编号（数字），可在url中查看",
+            "hint": "例如：123",
             "default": ""
           }
         }
