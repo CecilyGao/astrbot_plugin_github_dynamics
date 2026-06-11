@@ -1,51 +1,109 @@
 {
-    "github_token": {
-        "description": "GitHub Personal Access Token",
-        "type": "string",
-        "default": "",
-        "hint": "用于访问私有仓库和组织项目，格式 ghp_xxxxxxxxxxxx，需具有 repo、read:org、user 权限"
+  "github_token": {
+    "description": "GitHub Personal Access Token",
+    "type": "string",
+    "default": "",
+    "hint": "用于访问私有仓库和组织项目，格式 ghp_xxxxxxxxxxxx，需具有 repo、read:org、user 权限"
+  },
+  "poll_interval": {
+    "description": "轮询间隔（秒）",
+    "type": "int",
+    "default": 1800,
+    "hint": "每隔多少秒检查一次动态，默认 1800 秒（30 分钟），建议不低于 600 秒"
+  },
+  "max_entries": {
+    "description": "每次最多推送条目数",
+    "type": "int",
+    "default": 5,
+    "hint": "单次推送每个订阅项最多显示多少条新动态，设为 0 则不限制"
+  },
+  "timezone": {
+    "description": "时区",
+    "type": "string",
+    "default": "Asia/Shanghai",
+    "hint": "用于将 GitHub 动态的时间转换为本地时间，例如 Asia/Shanghai、America/New_York、Europe/London"
+  },
+  "username_qq": {
+    "type": "list",
+    "description": "GitHub 用户名与 QQ 号映射",
+    "items": {
+      "type": "object",
+      "properties": {
+        "username": { "type": "string", "description": "GitHub 用户名" },
+        "qq": { "type": "string", "description": "QQ 号" }
+      }
     },
-    "poll_interval": {
-        "description": "轮询间隔（秒）",
-        "type": "int",
-        "default": 1800,
-        "hint": "每隔多少秒检查一次动态，默认 1800 秒（30 分钟），建议不低于 600 秒"
-    },
-    "max_entries": {
-        "description": "每次最多推送条目数",
-        "type": "int",
-        "default": 5,
-        "hint": "单次推送每个订阅项最多显示多少条新动态，设为 0 则不限制"
-    },
-    "timezone": {
-        "description": "时区",
-        "type": "string",
-        "default": "Asia/Shanghai",
-        "hint": "用于将 GitHub 动态的时间转换为本地时间，例如 Asia/Shanghai、America/New_York、Europe/London"
-    },
-    "username_qq": {
-        "type": "list",
-        "description": "GitHub 用户名与 QQ 号映射",
+    "default": [],
+    "hint": "用于在推送消息中 @ 对应的 QQ 号，例如 [{ \"username\": \"octocat\", \"qq\": \"123456789\" }]"
+  },
+  "at_enable": {
+    "type": "bool",
+    "description": "是否在推送消息中 @ 对应的 QQ 号",
+    "default": false,
+    "hint": "在推送消息中 @ 对应的 QQ 号，需配合 username_qq 映射使用"
+  },
+  "whitelist": {
+    "description": "白名单用户",
+    "type": "list",
+    "default": [],
+    "hint": "只有白名单用户或管理员可以使用订阅管理指令。留空则所有用户均可使用"
+  },
+  "subscriptions": {
+    "description": "GitHub 订阅配置列表（可动态添加）",
+    "hint": "每个元素表示一个订阅目标，通过命令 gh subscribe 动态添加/删除，无需手动编辑。支持群聊独立订阅。",
+    "type": "template_list",
+    "default": [],
+    "templates": {
+      "github_subscription": {
+        "name": "GitHub 订阅规则",
         "items": {
-            "type": "object",
-            "properties": {
-                "username": { "type": "string", "description": "GitHub 用户名" },
-                "qq": { "type": "string", "description": "QQ 号" }
-            }
-        },
-        "default": [],
-        "hint": "用于在推送消息中 @ 对应的 QQ 号，例如 [{ \"username\": \"Kingcq\", \"qq\": \"404291187\" }]"
-    },
-    "at_enable": {
-        "type": "bool",
-        "description": "是否在推送消息中 @ 对应的 QQ 号",
-        "default": false,
-        "hint": "在推送消息中 @ 对应的 QQ 号，需配合 username_qq 映射使用"
-    },
-    "whitelist": {
-        "description": "白名单用户",
-        "type": "list",
-        "default": [],
-        "hint": "只有白名单用户或管理员可以使用订阅管理指令。留空则所有用户均可使用"
+          "group_id": {
+            "type": "string",
+            "description": "群号",
+            "hint": "私聊时此项可为空或特殊标识",
+            "default": ""
+          },
+          "user_id": {
+            "type": "string",
+            "description": "订阅的 GitHub 用户名",
+            "hint": "与 repo_id、organization_id 三选一",
+            "default": ""
+          },
+          "repo_id": {
+            "type": "string",
+            "description": "订阅的仓库名（格式：owner/repo）",
+            "hint": "与 user_id、organization_id 三选一",
+            "default": ""
+          },
+          "issues_enabled": {
+            "type": "bool",
+            "description": "监听 Issues",
+            "default": false
+          },
+          "commits_enabled": {
+            "type": "bool",
+            "description": "监听 Commits",
+            "default": true
+          },
+          "releases_enabled": {
+            "type": "bool",
+            "description": "监听 Releases",
+            "default": false
+          },
+          "organization_id": {
+            "type": "string",
+            "description": "订阅的组织名",
+            "hint": "与 user_id、repo_id 三选一，需配合 project_id",
+            "default": ""
+          },
+          "project_id": {
+            "type": "string",
+            "description": "订阅的项目编号（数字）",
+            "hint": "与 organization_id 配合使用",
+            "default": ""
+          }
+        }
+      }
     }
+  }
 }
