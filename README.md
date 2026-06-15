@@ -1,6 +1,6 @@
-# AstrBot GitHub Dynamics 插件
+# GitHub 动态推送插件
 
-通过 GitHub API 监听用户动态、仓库动态（Issues/Commits/Releases）及组织项目动态，支持personal access token查询私有仓库，多会话独立订阅与定时推送。
+通过 GitHub API 监听用户动态、仓库动态（Issues/Commits/Releases）及组织项目动态，支持使用personal access token查询私有仓库，多会话独立订阅与定时推送。
 
 ---
 
