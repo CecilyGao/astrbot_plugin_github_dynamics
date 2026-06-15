@@ -51,22 +51,26 @@
 
 | 命令 | 用法 | 说明 |
 |------|------|------|
-| `gh subscribe` | `gh subscribe 用户名`<br>`gh subscribe 仓库名:事件类型`<br>`gh subscribe 组织名/项目编号` | 在当前会话添加一个监听目标。<br>仓库事件类型可选：issues、commits、releases，多个用逗号分隔，默认为 commits。<br>组织项目编号可在项目 URL 中看到（如 org/5）。 |
+| `gh subscribe` | `gh subscribe 用户名`<br>`gh subscribe 仓库名:事件类型`<br>`gh subscribe 组织名/项目编号` | 在当前会话添加一个监听目标。<br>仓库事件类型可选：issues、commits、releases，默认为 commits。<br>组织项目编号可在项目 URL 中看到（如 org/5）。 |
 | `gh unsubscribe` | `gh unsubscribe 序号` | 取消当前会话中的某个订阅。序号通过 `gh list` 查看。 |
 | `gh list` | `gh list` | 列出当前会话的所有订阅及其序号。 |
 | `gh pushnow` | `gh pushnow` | 立即检查当前会话所有订阅的新动态并推送（不等待轮询）。 |
 | `gh check` | `gh check 目标` | 临时查询指定目标的最新动态（不添加订阅），目标语法同 `gh subscribe`。 |
-| `gh here` | `gh here` | 显示当前会话的 ID 以及已有的订阅数量/列表。 |
 
-提示：命令中的 <目标> 可以是用户登录名、仓库名（owner/repo，可加 :issues 等）、组织项目（org/number）。
+提示：命令中的 <目标> 可以是用户登录名、仓库名（owner/repo，可加 :issues,commits,releases等）、组织项目（org/number），例如：
+
+用户登录名：CecilyGao
+
+仓库名：CecilyGao/astrbot_plugin_github_dynamics      事件类型：issues,commits
+
+组织项目：AstrBotDevs/1
 
 ```
 示例：
-gh subscribe octocat
-gh subscribe microsoft/vscode:issues
-gh subscribe microsoft/vscode:issues,releases
-gh subscribe facebook/react
-gh subscribe my-org/5
+gh check CecilyGao
+gh subscribe CecilyGao/astrbot_plugin_github_dynamics:issues,commits
+gh subscribe facebook/react:releases
+gh subscribe AstrBotDevs/1
 ```
 
 ## ⌛ 工作流程
@@ -95,7 +99,10 @@ gh subscribe my-org/5
 
 - 为什么我订阅了用户，但收不到他的任何动态？
 
-    请确认该用户最近有公开活动。如果是私有仓库的活动，需要 token 有 repo 权限且你的账户能访问该仓库。
+    请确认该用户最近有公开活动。如果是私有仓库的活动，需要 token 有 repo 权限且你的账户能访问该仓库。可以尝试下面的curl检测你的token是否有权访问
+```bash
+curl -H "Authorization: token ghp_1145141919810" "https://api.github.com/repos/组织名/仓库名/事件（issues, commits, releases）"
+```
 
 
 - 订阅仓库后，推送的内容包含大量旧数据？
@@ -125,3 +132,5 @@ MIT License © 2026 CecilyGao
 - 本插件融合了astrbot_plugin_private_github与astrbot_plugin_listen_github的设计，感谢原插件作者[aliveriver](https://github.com/aliveriver)与协作者[Kingcq](https://github.com/kingcxp)的贡献！
 
 - [Astrbot Team](https://github.com/AstrBotDevs/AstrBot)
+
+- 感谢[reminder插件](https://github.com/Foolllll-J/astrbot_plugin_reminder) 的设计思路与架构启发，为本插件的多会话订阅管理提供了重要参考。
