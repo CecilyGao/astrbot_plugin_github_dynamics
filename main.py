@@ -41,16 +41,13 @@ def is_user_allowed(plugin, event: AstrMessageEvent) -> bool:
         return True
 
 def get_session_id(event: AstrMessageEvent) -> str:
-    """获取会话标识，群聊使用群号，私聊使用 'private_用户ID'"""
-    if event.get_group_id():
-        return str(event.get_group_id())
-    else:
-        return f"private_{event.get_sender_id()}"
+    return event.unified_msg_origin
 
 def get_group_id_from_session(session: str) -> str:
-    if session.startswith("private_"):
-        return ""
-    return session
+    parts = session.split(":", 2)
+    if len(parts) >= 3 and parts[1] == "GroupMessage":
+        return parts[2]
+    return ""
 
 # ------------------------------- 主插件类 ------------------------------
 @register(
@@ -74,33 +71,25 @@ class GitHubDynamicsPlugin(Star):
         self.at_enable: bool = config.get("at_enable", False)
         self.whitelist: List[str] = config.get("whitelist", [])
 
-        # 用户名 -> QQ 映射（仅支持字符串列表格式）
         self.username_qq_map: Dict[str, str] = self._load_username_qq_map()
-
-        # 订阅数据结构：{ session: [ {type, ...}, ... ] }
         self.subscriptions: Dict[str, List[Dict]] = {}
 
         self._poll_task: Optional[asyncio.Task] = None
         self._http_session: Optional[aiohttp.ClientSession] = None
 
-        # 从配置文件加载订阅
         self._load_subscriptions_from_config()
 
-    # ========================= 用户名-QQ 映射（仅支持字符串列表） =========================
+    # ========================= 用户名-QQ 映射 =========================
     def _load_username_qq_map(self) -> Dict[str, str]:
-        """从配置加载 username_qq，仅支持字符串列表格式 ["username:qq", ...]"""
         raw = self.config.get("username_qq", [])
         if not isinstance(raw, list):
-            logger.warning("[GitHubDynamics] username_qq 配置格式错误，应为字符串列表，已忽略")
             return {}
         mapping = {}
         for item in raw:
             if not isinstance(item, str):
-                logger.warning(f"[GitHubDynamics] username_qq 列表项不是字符串，已忽略: {item}")
                 continue
             parts = item.split(":", 1)
             if len(parts) != 2:
-                logger.warning(f"[GitHubDynamics] username_qq 格式错误，应为 '用户名:QQ号'，已忽略: {item}")
                 continue
             username = parts[0].strip()
             qq = parts[1].strip()
@@ -111,11 +100,46 @@ class GitHubDynamicsPlugin(Star):
     def _resolve_qq_for_username(self, username: str) -> Optional[str]:
         if not username:
             return None
-        return self.username_qq_map.get(username.strip().lower())
+        clean = username.split('@')[0].strip().lower()
+        return self.username_qq_map.get(clean)
 
-    # ========================= 数据持久化（多模板配置文件） =========================
+    @staticmethod
+    def _normalize_user_display(user_obj: Dict[str, Any]) -> str:
+        if not user_obj:
+            return ""
+        name = user_obj.get("name")
+        login = user_obj.get("login")
+        if isinstance(name, str) and name.strip() and name.strip().lower() != "none":
+            return name.strip()
+        if login:
+            return login
+        return ""
+
+    @staticmethod
+    def _extract_assignee_logins(assignees_field: Any) -> List[str]:
+        nodes = []
+        if not assignees_field:
+            return []
+        if isinstance(assignees_field, dict):
+            nodes = assignees_field.get("nodes", [])
+        elif isinstance(assignees_field, list):
+            nodes = assignees_field
+        else:
+            return []
+        res = []
+        for u in nodes:
+            if not isinstance(u, dict):
+                continue
+            name = u.get("name")
+            login = u.get("login")
+            if isinstance(name, str) and name.strip() and name.strip().lower() != "none":
+                res.append(name.strip())
+            elif login:
+                res.append(login)
+        return res
+
+    # ========================= 数据持久化 =========================
     def _load_subscriptions_from_config(self):
-        """从插件配置文件的 subscriptions 字段加载订阅数据（支持多模板）"""
         raw_list = self.config.get("subscriptions", [])
         if not isinstance(raw_list, list):
             raw_list = []
@@ -123,10 +147,11 @@ class GitHubDynamicsPlugin(Star):
         for item in raw_list:
             template_key = item.get("__template_key", "")
             group_id = str(item.get("group_id", "")).strip()
-            if not group_id:
-                session = "private"
+            if group_id:
+                session = f"default:GroupMessage:{group_id}"
             else:
-                session = group_id
+                logger.warning("[GitHubDynamics] 私聊订阅历史数据无法恢复，请重新订阅。")
+                continue
             sub = self._config_item_to_sub(item, template_key)
             if sub:
                 new_subs.setdefault(session, []).append(sub)
@@ -134,15 +159,12 @@ class GitHubDynamicsPlugin(Star):
         logger.info(f"[GitHubDynamics] 从配置文件加载了 {len(self.subscriptions)} 个会话的订阅")
 
     def _config_item_to_sub(self, item: dict, template_key: str = "") -> Optional[dict]:
-        """根据模板类型和字段将配置项转换为内存中的订阅字典"""
         if template_key == "user_subscription" or (not template_key and item.get("user_id")):
-            # 用户订阅
             user_id = item.get("user_id")
             if not user_id:
                 return None
             return {"type": "user", "username": user_id}
         elif template_key == "repo_subscription" or (not template_key and item.get("repo_id")):
-            # 仓库订阅
             repo_id = item.get("repo_id")
             if not repo_id:
                 return None
@@ -157,7 +179,6 @@ class GitHubDynamicsPlugin(Star):
                 events = ["commits"]
             return {"type": "repo", "repo": repo_id, "events": events}
         elif template_key == "project_subscription" or (not template_key and item.get("organization_id") and item.get("project_id")):
-            # 项目订阅
             org = item.get("organization_id")
             proj = item.get("project_id")
             if not org or not proj:
@@ -167,14 +188,9 @@ class GitHubDynamicsPlugin(Star):
             return None
 
     def _sub_to_config_item(self, sub: dict, session: str) -> dict:
-        """将内存中的订阅项转换为配置项格式（带模板键）"""
         group_id = get_group_id_from_session(session)
         if sub["type"] == "user":
-            return {
-                "__template_key": "user_subscription",
-                "group_id": group_id,
-                "user_id": sub["username"]
-            }
+            return {"__template_key": "user_subscription", "group_id": group_id, "user_id": sub["username"]}
         elif sub["type"] == "repo":
             return {
                 "__template_key": "repo_subscription",
@@ -182,38 +198,36 @@ class GitHubDynamicsPlugin(Star):
                 "repo_id": sub["repo"],
                 "issues_enabled": "issues" in sub["events"],
                 "commits_enabled": "commits" in sub["events"],
-                "releases_enabled": "releases" in sub["events"]
+                "releases_enabled": "releases" in sub["events"],
             }
         elif sub["type"] == "project":
             return {
                 "__template_key": "project_subscription",
                 "group_id": group_id,
                 "organization_id": sub["org"],
-                "project_id": str(sub["number"])
+                "project_id": str(sub["number"]),
             }
         return {}
 
     def _sync_subscriptions_to_config(self):
-        """将当前 self.subscriptions 同步到插件的配置文件中"""
         config_list = []
         for session, subs in self.subscriptions.items():
             for sub in subs:
                 config_list.append(self._sub_to_config_item(sub, session))
         self.config["subscriptions"] = config_list
         self.config.save_config()
-        logger.debug(f"[GitHubDynamics] 已同步 {len(config_list)} 条订阅到配置文件")
 
-    # ========================= 游标管理（KV存储） =========================
+    # ========================= 游标管理 =========================
     def _get_cursor_key(self, session: str, sub: Dict, event_type: str = None) -> str:
+        safe_session = session.replace(":", "_").replace(" ", "")
         if sub["type"] == "user":
-            return f"{KV_LAST_CURSOR_PREFIX}{session}_user_{sub['username']}"
+            return f"{KV_LAST_CURSOR_PREFIX}{safe_session}_user_{sub['username']}"
         elif sub["type"] == "repo":
             if event_type:
-                return f"{KV_LAST_CURSOR_PREFIX}{session}_{sub['repo']}_{event_type}"
-            else:
-                return f"{KV_LAST_CURSOR_PREFIX}{session}_{sub['repo']}"
+                return f"{KV_LAST_CURSOR_PREFIX}{safe_session}_{sub['repo']}_{event_type}"
+            return f"{KV_LAST_CURSOR_PREFIX}{safe_session}_{sub['repo']}"
         else:
-            return f"{KV_LAST_CURSOR_PREFIX}{session}_project_{sub['org']}_{sub['number']}"
+            return f"{KV_LAST_CURSOR_PREFIX}{safe_session}_project_{sub['org']}_{sub['number']}"
 
     async def _get_cursor(self, session: str, sub: Dict, event_type: str = None) -> str:
         key = self._get_cursor_key(session, sub, event_type)
@@ -227,26 +241,17 @@ class GitHubDynamicsPlugin(Star):
         try:
             if sub["type"] == "user":
                 latest = await self._fetch_latest_user_event(sub["username"])
-                if latest:
-                    cursor = str(latest.get("id", ""))
-                    await self._set_cursor(session, sub, cursor)
-                else:
-                    await self._set_cursor(session, sub, "__EMPTY__")
+                cursor = str(latest.get("id", "")) if latest else "__EMPTY__"
+                await self._set_cursor(session, sub, cursor)
             elif sub["type"] == "repo":
                 for ev_type in sub["events"]:
                     latest = await self._fetch_latest_repo_entry(sub["repo"], ev_type)
-                    if latest:
-                        cursor = self._extract_cursor_from_entry(latest, ev_type)
-                        await self._set_cursor(session, sub, cursor, ev_type)
-                    else:
-                        await self._set_cursor(session, sub, "__EMPTY__", ev_type)
+                    cursor = self._extract_cursor_from_entry(latest, ev_type) if latest else "__EMPTY__"
+                    await self._set_cursor(session, sub, cursor, ev_type)
             else:
                 latest = await self._fetch_latest_project_item(sub["org"], sub["number"])
-                if latest:
-                    cursor = latest.get("raw_updated_at", "2000-01-01T00:00:00Z")
-                    await self._set_cursor(session, sub, cursor)
-                else:
-                    await self._set_cursor(session, sub, "__EMPTY__")
+                cursor = latest.get("raw_updated_at", "2000-01-01T00:00:00Z") if latest else "__EMPTY__"
+                await self._set_cursor(session, sub, cursor)
             logger.info(f"[GitHubDynamics] 初始化游标成功: {self._get_cursor_key(session, sub)}")
         except Exception as e:
             logger.error(f"[GitHubDynamics] 初始化游标失败: {e}")
@@ -255,13 +260,10 @@ class GitHubDynamicsPlugin(Star):
     async def initialize(self):
         if not self.github_token:
             logger.error("[GitHubDynamics] github_token 未配置，插件将无法正常工作")
-        logger.info(
-            f"[GitHubDynamics] 初始化完成，轮询间隔: {self.poll_interval} 秒，"
-            f"已加载 {len(self.subscriptions)} 个会话订阅"
-        )
+        logger.info(f"[GitHubDynamics] 初始化完成，轮询间隔: {self.poll_interval} 秒，已加载 {len(self.subscriptions)} 个会话订阅")
         self._http_session = aiohttp.ClientSession(
             headers={"Authorization": f"token {self.github_token}", "Accept": "application/vnd.github.v3+json"},
-            timeout=aiohttp.ClientTimeout(total=30)
+            timeout=aiohttp.ClientTimeout(total=30),
         )
         await self._ensure_all_cursors()
         self._poll_task = asyncio.create_task(self._poll_loop())
@@ -318,7 +320,7 @@ class GitHubDynamicsPlugin(Star):
         if not self._http_session or self._http_session.closed:
             self._http_session = aiohttp.ClientSession(
                 headers={"Authorization": f"token {self.github_token}"},
-                timeout=aiohttp.ClientTimeout(total=30)
+                timeout=aiohttp.ClientTimeout(total=30),
             )
         try:
             async with self._http_session.get(url) as resp:
@@ -329,10 +331,7 @@ class GitHubDynamicsPlugin(Star):
                     logger.warning(f"[GitHubDynamics] API 请求失败: {url} -> HTTP {resp.status}")
                     return None
                 data = await resp.json()
-                if isinstance(data, list):
-                    return data
-                else:
-                    return [data]
+                return data if isinstance(data, list) else [data]
         except Exception as e:
             logger.error(f"[GitHubDynamics] API 请求异常: {url} -> {e}")
             return None
@@ -341,7 +340,7 @@ class GitHubDynamicsPlugin(Star):
         if not self._http_session or self._http_session.closed:
             self._http_session = aiohttp.ClientSession(
                 headers={"Authorization": f"token {self.github_token}"},
-                timeout=aiohttp.ClientTimeout(total=30)
+                timeout=aiohttp.ClientTimeout(total=30),
             )
         try:
             payload = {"query": query}
@@ -367,13 +366,10 @@ class GitHubDynamicsPlugin(Star):
 
     async def _fetch_latest_user_event(self, username: str) -> Optional[Dict]:
         events = await self._fetch_user_events(username, per_page=1)
-        if events and len(events) > 0:
-            return events[0]
-        return None
+        return events[0] if events else None
 
     async def _fetch_new_user_entries(self, username: str, last_cursor: str) -> Tuple[List[Dict], str]:
-        per_page = MAX_SCAN_ENTRIES
-        events = await self._fetch_user_events(username, per_page=per_page)
+        events = await self._fetch_user_events(username, per_page=MAX_SCAN_ENTRIES)
         if not events:
             return [], last_cursor
 
@@ -387,7 +383,7 @@ class GitHubDynamicsPlugin(Star):
                 new_entries.append(entry)
 
         if self.max_entries > 0 and len(new_entries) > self.max_entries:
-            new_entries = new_entries[:self.max_entries]
+            new_entries = new_entries[: self.max_entries]
 
         if new_entries and events:
             latest_cursor = str(events[0].get("id", ""))
@@ -403,57 +399,71 @@ class GitHubDynamicsPlugin(Star):
         title = f"[{event_type}] {repo}"
         link = f"https://github.com/{repo}"
         content = ""
+        updates = []
 
         if event_type == "PushEvent":
             commits = payload.get("commits", [])
             cnt = len(commits)
             content = f"推送了 {cnt} 个提交"
+            for commit in commits[:3]:
+                sha = commit.get("sha", "")[:7]
+                msg = commit.get("message", "").splitlines()[0][:60]
+                updates.append(f"📌 {sha}: {msg}")
+            if cnt > 3:
+                updates.append(f"... 还有 {cnt-3} 个提交")
         elif event_type == "IssuesEvent":
             action = payload.get("action", "")
             issue = payload.get("issue", {})
             number = issue.get("number", "")
-            content = f"{action} issue #{number}: {issue.get('title', '')[:80]}"
+            title_issue = issue.get("title", "")[:80]
+            content = f"{action} issue #{number}: {title_issue}"
             link = issue.get("html_url", link)
+            updates.append(f"🔖 {action} 操作")
         elif event_type == "PullRequestEvent":
             action = payload.get("action", "")
             pr = payload.get("pull_request", {})
             number = pr.get("number", "")
-            content = f"{action} PR #{number}: {pr.get('title', '')[:80]}"
+            title_pr = pr.get("title", "")[:80]
+            content = f"{action} PR #{number}: {title_pr}"
             link = pr.get("html_url", link)
+            updates.append(f"🔀 {action} 操作")
         elif event_type == "CreateEvent":
             ref_type = payload.get("ref_type", "")
             ref = payload.get("ref", "")
             content = f"创建了 {ref_type} {ref}".strip()
+            updates.append(f"✨ 创建了 {ref_type}")
         elif event_type == "WatchEvent":
             content = "Star 了仓库"
+            updates.append("⭐ Star 了仓库")
         elif event_type == "ForkEvent":
             forkee = payload.get("forkee", {})
             content = f"Fork 了仓库到 {forkee.get('full_name', '')}"
             link = forkee.get("html_url", link)
+            updates.append("🍴 Fork 了仓库")
         else:
             content = f"触发了 {event_type} 事件"
+            updates.append(f"⚡ 触发 {event_type}")
 
         return {
             "title": title,
             "link": link,
             "published": self._convert_time(created_at),
             "content": content,
+            "updates": updates,
             "id": str(event.get("id", "")),
             "type": "user_event",
             "author": username,
+            "assignees": [],
         }
 
     # ========================= 仓库动态 =========================
     async def _fetch_latest_repo_entry(self, repo: str, event_type: str) -> Optional[Dict]:
         url = self._build_repo_api_url(repo, event_type, per_page=1)
         data = await self._rest_api_get(url)
-        if data and len(data) > 0:
-            return data[0]
-        return None
+        return data[0] if data else None
 
     async def _fetch_new_repo_entries(self, repo: str, event_type: str, last_cursor: str) -> Tuple[List[Dict], str]:
-        per_page = MAX_SCAN_ENTRIES
-        url = self._build_repo_api_url(repo, event_type, per_page=per_page)
+        url = self._build_repo_api_url(repo, event_type, per_page=MAX_SCAN_ENTRIES)
         items = await self._rest_api_get(url)
         if not items:
             return [], last_cursor
@@ -468,7 +478,7 @@ class GitHubDynamicsPlugin(Star):
                 new_entries.append(entry)
 
         if self.max_entries > 0 and len(new_entries) > self.max_entries:
-            new_entries = new_entries[:self.max_entries]
+            new_entries = new_entries[: self.max_entries]
 
         if new_entries and items:
             latest_cursor = self._extract_cursor_from_entry(items[0], event_type)
@@ -487,43 +497,60 @@ class GitHubDynamicsPlugin(Star):
 
     def _build_repo_entry_dict(self, raw: Dict, event_type: str) -> Dict:
         if event_type == "issues":
-            user = raw.get("user", {})
+            user_obj = raw.get("user") or {}
+            author = self._normalize_user_display(user_obj)
+            assignees = self._extract_assignee_logins(raw.get("assignees") or [])
+            updates = [f"📝 创建于 {self._convert_time(raw['created_at'])}"]
+            if raw.get("state") == "closed":
+                updates.append("🔒 状态：已关闭")
+            else:
+                updates.append("🟢 状态：开放中")
             return {
                 "title": f"[Issue] #{raw['number']}: {raw['title']}",
                 "link": raw["html_url"],
                 "published": self._convert_time(raw["created_at"]),
                 "content": (raw.get("body") or "")[:200],
+                "updates": updates,
                 "id": str(raw["id"]),
                 "type": "issue",
-                "author": user.get("login", ""),
+                "author": author,
+                "assignees": assignees,
             }
         elif event_type == "commits":
             commit = raw.get("commit", {})
+            message = commit.get("message", "")
+            short_msg = message.splitlines()[0][:100]
+            updates = [f"💬 {short_msg}"]
             return {
-                "title": f"[Commit] {raw['sha'][:7]}: {commit.get('message', '').splitlines()[0][:100]}",
+                "title": f"[Commit] {raw['sha'][:7]}: {short_msg}",
                 "link": raw["html_url"],
                 "published": self._convert_time(commit.get("committer", {}).get("date", "")),
-                "content": commit.get("message", "").replace("\n", " ")[:200],
+                "content": message.replace("\n", " ")[:200],
+                "updates": updates,
                 "id": raw["sha"],
                 "type": "commit",
+                "author": "",
+                "assignees": [],
             }
         elif event_type == "releases":
+            updates = [f"🏷️ 版本 {raw['tag_name']} 发布"]
             return {
                 "title": f"[Release] {raw['tag_name']}: {raw.get('name') or raw['tag_name']}",
                 "link": raw["html_url"],
                 "published": self._convert_time(raw.get("published_at") or raw["created_at"]),
                 "content": (raw.get("body") or "")[:200],
+                "updates": updates,
                 "id": str(raw["id"]),
                 "type": "release",
+                "author": "",
+                "assignees": [],
             }
         return {}
 
     # ========================= 组织项目 =========================
     async def _fetch_latest_project_item(self, org: str, number: int) -> Optional[Dict]:
         items = await self._fetch_project_items(org, number, first=1)
-        if items:
-            return items[0]
-        return None
+        return items[0] if items else None
 
     async def _fetch_project_items(self, org: str, number: int, first: int = 50) -> List[Dict]:
         query = """
@@ -539,12 +566,60 @@ class GitHubDynamicsPlugin(Star):
                                 ... on Issue {
                                     id number title url bodyText state
                                     createdAt updatedAt
-                                    author { login name }
+                                    author { login ... on User { name } }
+                                    assignees(first: 50) { nodes { login ... on User { name } } }
+                                    comments(last: 10) {
+                                        nodes { author { login ... on User { name } } bodyText createdAt }
+                                    }
+                                    timelineItems(last: 15) {
+                                        nodes {
+                                            __typename
+                                            ... on ClosedEvent {
+                                                createdAt
+                                                actor { login ... on User { name } }
+                                            }
+                                            ... on ReopenedEvent {
+                                                createdAt
+                                                actor { login ... on User { name } }
+                                            }
+                                            ... on AssignedEvent {
+                                                createdAt
+                                                actor { login ... on User { name } }
+                                                assignee { ... on User { login name } }
+                                            }
+                                        }
+                                    }
                                 }
                                 ... on PullRequest {
                                     id number title url bodyText state merged mergedAt
                                     createdAt updatedAt
-                                    author { login name }
+                                    author { login ... on User { name } }
+                                    assignees(first: 50) { nodes { login ... on User { name } } }
+                                    comments(last: 10) {
+                                        nodes { author { login ... on User { name } } bodyText createdAt }
+                                    }
+                                    timelineItems(last: 15) {
+                                        nodes {
+                                            __typename
+                                            ... on ClosedEvent {
+                                                createdAt
+                                                actor { login ... on User { name } }
+                                            }
+                                            ... on ReopenedEvent {
+                                                createdAt
+                                                actor { login ... on User { name } }
+                                            }
+                                            ... on MergedEvent {
+                                                createdAt
+                                                actor { login ... on User { name } }
+                                            }
+                                            ... on AssignedEvent {
+                                                createdAt
+                                                actor { login ... on User { name } }
+                                                assignee { ... on User { login name } }
+                                            }
+                                        }
+                                    }
                                 }
                                 ... on DraftIssue {
                                     id title bodyText createdAt updatedAt
@@ -578,7 +653,7 @@ class GitHubDynamicsPlugin(Star):
         new_entries = []
         max_time = last_cursor
         for item in items:
-            entry = self._build_project_entry_dict(item, org, number)
+            entry = self._build_project_entry_dict(item, org, number, last_cursor)
             if not entry:
                 continue
             entry_time = entry.get("raw_updated_at", "")
@@ -588,26 +663,109 @@ class GitHubDynamicsPlugin(Star):
                     max_time = entry_time
 
         if self.max_entries > 0 and len(new_entries) > self.max_entries:
-            new_entries = new_entries[-self.max_entries:]
+            new_entries = new_entries[-self.max_entries :]
 
         return new_entries, max_time
 
-    def _build_project_entry_dict(self, item: Dict, org: str, number: int) -> Dict:
+    def _build_project_entry_dict(self, item: Dict, org: str, number: int, last_cursor: str = "") -> Dict:
         content = item.get("content")
         if not content:
             return {}
-        typename = content.get("__typename", "Card")
+
+        typename = content.get("__typename")
         title = content.get("title", "无标题")
         url = content.get("url", "")
-        updated_at = content.get("updatedAt") or item.get("updatedAt") or ""
+        item_updated_at = item.get("updatedAt", "")
+        content_updated_at = content.get("updatedAt", "")
+        content_created_at = content.get("createdAt", "")
+        valid_times = [t for t in [item_updated_at, content_updated_at, content_created_at] if t]
+
+        updates = []
+        actors = set()
+        author = ""
+        assignees = []
+
+        def is_new(ts):
+            if not ts:
+                return False
+            if not last_cursor or last_cursor == "__EMPTY__":
+                return True
+            return ts > last_cursor
+
+        if typename in ("Issue", "PullRequest"):
+            number_str = f"#{content.get('number', '')}"
+            item_type = "Issue" if typename == "Issue" else "PR"
+            author_obj = content.get("author") or {}
+            author = self._normalize_user_display(author_obj)
+            assignees = self._extract_assignee_logins(content.get("assignees") or {})
+            state = content.get("state", "")
+            merged = bool(content.get("merged", False))
+
+            if is_new(content_created_at):
+                updates.append(f"🆕 新建卡片：{author}")
+                actors.add(author)
+
+            comments = content.get("comments", {}).get("nodes", []) or []
+            for c in comments:
+                c_time = c.get("createdAt", "")
+                if is_new(c_time):
+                    c_author = self._normalize_user_display(c.get("author") or {})
+                    snippet = (c.get("bodyText", "") or "").replace("\n", " ")[:200]
+                    updates.append(f"💬 评论: {c_author}: {snippet}")
+                    actors.add(c_author)
+                    valid_times.append(c_time)
+
+            timeline = content.get("timelineItems", {}).get("nodes", []) or []
+            for evt in timeline:
+                if not evt:
+                    continue
+                e_time = evt.get("createdAt", "")
+                if is_new(e_time):
+                    e_type = evt.get("__typename", "")
+                    e_actor = self._normalize_user_display(evt.get("actor") or {})
+                    if e_type == "ClosedEvent":
+                        updates.append(f"🔒 关闭了卡片：{e_actor}")
+                        actors.add(e_actor)
+                    elif e_type == "ReopenedEvent":
+                        updates.append(f"🔓 重新打开了卡片：{e_actor}")
+                        actors.add(e_actor)
+                    elif e_type == "MergedEvent":
+                        updates.append(f"🎉 合并了 PR：{e_actor}")
+                        actors.add(e_actor)
+                    elif e_type == "AssignedEvent":
+                        assignee_obj = evt.get("assignee") or {}
+                        assignee_name = assignee_obj.get("name") or assignee_obj.get("login") or "某人"
+                        updates.append(f"👤 指派给了：{assignee_name}")
+                    valid_times.append(e_time)
+
+            if not updates and last_cursor and last_cursor != "__EMPTY__":
+                updates.append("📌 状态/属性更新")
+
+        elif typename == "DraftIssue":
+            item_type = "Draft Issue"
+            number_str = ""
+            if is_new(content_created_at):
+                updates.append(f"🆕 新建草稿卡片：{author}")
+        else:
+            item_type = "Card"
+            number_str = ""
+            if is_new(item_updated_at) and is_new(content_created_at):
+                updates.append("🆕 新建卡片")
+
+        last_active_time = max(valid_times) if valid_times else (content_updated_at or item_updated_at or content_created_at)
+        primary_actor = list(actors)[0] if actors else author
+
         return {
-            "title": f"[{typename}] {title}",
+            "title": f"[{item_type} {number_str}] {title}".replace("[] ", ""),
             "link": url,
-            "published": self._convert_time(updated_at),
-            "raw_updated_at": updated_at,
+            "published": self._convert_time(last_active_time),
+            "raw_updated_at": last_active_time,
             "id": item.get("id", ""),
             "type": "project_item",
-            "content": (content.get("bodyText") or "")[:200],
+            "author": author,
+            "assignees": assignees,
+            "updates": updates,
+            "actor": primary_actor,
         }
 
     # ========================= 轮询与推送 =========================
@@ -627,124 +785,267 @@ class GitHubDynamicsPlugin(Star):
         if not self.github_token:
             return
 
-        messages_by_session: Dict[str, List[Tuple[str, List[str]]]] = {}
+        session_messages: Dict[str, List[str]] = {}
 
         for session, items in list(self.subscriptions.items()):
             for sub in items:
                 try:
                     if sub["type"] == "user":
                         last_cursor = await self._get_cursor(session, sub)
-                        if not last_cursor or last_cursor == "__EMPTY__":
-                            continue
+                        if not last_cursor:
+                            await self._init_subscription_cursor(session, sub)
+                            last_cursor = await self._get_cursor(session, sub)
+                            if not last_cursor:
+                                continue
                         new_entries, new_cursor = await self._fetch_new_user_entries(sub["username"], last_cursor)
                         if new_entries:
                             msg = self._format_user_entries(sub["username"], new_entries)
                             if msg:
-                                assignees = [e.get("author") for e in new_entries if e.get("author")]
-                                messages_by_session.setdefault(session, []).append((msg, assignees))
+                                session_messages.setdefault(session, []).append(msg)
                         if new_cursor and new_cursor != last_cursor:
                             await self._set_cursor(session, sub, new_cursor)
 
                     elif sub["type"] == "repo":
                         all_new_entries = []
-                        assignees = []
                         for ev_type in sub["events"]:
                             last_cursor = await self._get_cursor(session, sub, ev_type)
-                            if not last_cursor or last_cursor == "__EMPTY__":
-                                continue
+                            if not last_cursor:
+                                await self._init_subscription_cursor(session, sub)
+                                last_cursor = await self._get_cursor(session, sub, ev_type)
+                                if not last_cursor:
+                                    continue
                             new_entries, new_cursor = await self._fetch_new_repo_entries(sub["repo"], ev_type, last_cursor)
                             if new_entries:
                                 all_new_entries.extend(new_entries)
-                                assignees.extend([e.get("author") for e in new_entries if e.get("author")])
                             if new_cursor and new_cursor != last_cursor:
                                 await self._set_cursor(session, sub, new_cursor, ev_type)
                         if all_new_entries:
+                            all_new_entries.sort(key=lambda x: x.get("published_raw", x.get("published", "")), reverse=True)
                             unique = {e["id"]: e for e in all_new_entries}.values()
-                            limited = list(unique)[:self.max_entries] if self.max_entries > 0 else list(unique)
+                            limited = list(unique)[: self.max_entries] if self.max_entries > 0 else list(unique)
                             msg = self._format_repo_entries(sub["repo"], sub["events"], limited)
                             if msg:
-                                messages_by_session.setdefault(session, []).append((msg, assignees))
+                                session_messages.setdefault(session, []).append(msg)
 
                     else:
                         last_cursor = await self._get_cursor(session, sub)
-                        if not last_cursor or last_cursor == "__EMPTY__":
-                            continue
+                        if not last_cursor:
+                            await self._init_subscription_cursor(session, sub)
+                            last_cursor = await self._get_cursor(session, sub)
+                            if not last_cursor:
+                                continue
                         new_entries, new_cursor = await self._fetch_new_project_entries(sub["org"], sub["number"], last_cursor)
                         if new_entries:
+                            new_entries.sort(key=lambda x: x.get("raw_updated_at", ""), reverse=True)
                             msg = self._format_project_entries(f"{sub['org']}/{sub['number']}", new_entries)
                             if msg:
-                                messages_by_session.setdefault(session, []).append((msg, []))
+                                session_messages.setdefault(session, []).append(msg)
                         if new_cursor and new_cursor != last_cursor:
                             await self._set_cursor(session, sub, new_cursor)
 
                 except Exception as e:
                     logger.error(f"[GitHubDynamics] 处理订阅 {sub} 失败: {e}")
 
-        for session, msg_list in messages_by_session.items():
-            full_msg = "\n\n".join([m[0] for m in msg_list])
-            chain = MessageChain().message(full_msg)
-            if self.at_enable:
-                ats = set()
-                for _, ass in msg_list:
-                    for a in ass:
-                        qq = self._resolve_qq_for_username(a)
+        for session, msg_list in session_messages.items():
+            full_msg = "\n\n".join(msg_list)
+            # 后处理：强制在块之间加空行
+            full_msg = self._ensure_blank_between_sections(full_msg)
+            await self._send_message_with_mentions(session, full_msg)
+
+    # ========================= 消息发送（基于关键词精确匹配） =========================
+    async def _send_message_with_mentions(self, session: str, full_msg: str):
+        """发送消息，只对包含特定关键词的行中的 GitHub 用户名进行处理：
+        - 如果有 QQ 映射：在用户名后添加 @ 消息段 + 表情 👨‍💻
+        - 如果没有映射：仅在用户名后添加文本表情 👨‍💻
+        """
+        chain = MessageChain()
+        lines = full_msg.splitlines(keepends=True)
+        
+        # 需要处理的关键词及对应的正则（用于提取用户名）
+        # 模式：关键词 -> (正则, 是否多用户名)
+        patterns = {
+            "🙋 提出者：": (re.compile(r'🙋 提出者：\s*([^\s]+)'), False),
+            "🆕 新建卡片：": (re.compile(r'🆕 新建卡片：\s*([^\s]+)'), False),
+            "👤 指派给了：": (re.compile(r'👤 指派给了：\s*([^\s]+)'), False),
+            "🔔 指派给：": (re.compile(r'🔔 指派给：\s*([^,\n]+(?:,\s*[^,\n]+)*)'), True),
+        }
+
+        for line in lines:
+            if not self.at_enable:
+                chain.message(line)
+                continue
+            
+            processed = False
+            for keyword, (regex, multi) in patterns.items():
+                if keyword in line:
+                    match = regex.search(line)
+                    if not match:
+                        continue
+                    if multi:
+                        # 处理逗号分隔的多个用户名
+                        usernames_raw = match.group(1).strip()
+                        usernames = [u.strip() for u in usernames_raw.split(',') if u.strip()]
+                    else:
+                        usernames = [match.group(1).strip()]
+                    
+                    # 切分行：关键词之前 + 关键词 + (用户名之后的部分)
+                    prefix = line[:line.index(keyword) + len(keyword)]
+                    after_keyword = line[line.index(keyword) + len(keyword):]
+                    # 去掉已经匹配的用户名字符串
+                    if multi:
+                        after_usernames = after_keyword[len(usernames_raw):]
+                    else:
+                        after_usernames = after_keyword[len(usernames[0]):]
+                    # 在 multi 或 single 的分支中，得到 after_usernames 后：
+                    if after_usernames and after_usernames[0] != '\n':
+                        after_usernames = after_usernames[1:]  # 去掉多余字符
+                    chain.message(prefix)
+                    for idx, username in enumerate(usernames):
+                        qq = self._resolve_qq_for_username(username)
                         if qq:
-                            ats.add((a, qq))
-                for name, qq in ats:
-                    try:
-                        chain.at(name, str(qq))
-                        chain.message(" ")
-                    except Exception:
-                        pass
-            try:
-                await self.context.send_message(session, chain)
-            except Exception as e:
-                logger.error(f"[GitHubDynamics] 推送到 {session} 失败: {e}")
+                            chain.message(username)
+                            chain.message(" ")
+                            chain.at(username, str(qq))
+                            chain.message(" 👨‍💻\n")
+                        else:
+                            chain.message(username)
+                            chain.message(" 👨‍💻\n")
+                        if idx < len(usernames) - 1:
+                            chain.message(", ")
+                    chain.message(after_usernames)
+                    processed = True
+                    break  # 一行只处理第一个匹配到的关键词
+            
+            if not processed:
+                chain.message(line)
+        
+        try:
+            await self.context.send_message(session, chain)
+        except Exception as e:
+            logger.error(f"[GitHubDynamics] 推送到 {session} 失败: {e}")
 
-    # ========================= 消息格式化 =========================
-    @staticmethod
-    def _format_user_entries(username: str, entries: List[Dict]) -> str:
-        lines = [f"👤 用户 {username} 的新动态（{len(entries)} 条）：\n"]
+    # ========================= 强制获取最新动态（用于 pushnow） =========================
+    async def _fetch_latest_entries_force(self, sub: Dict) -> List[Dict]:
+        entries = []
+        if sub["type"] == "user":
+            events = await self._fetch_user_events(sub["username"], per_page=self.max_entries or 10)
+            if events:
+                for ev in events[: self.max_entries or 10]:
+                    entry = self._build_user_entry_dict(ev, sub["username"])
+                    if entry:
+                        entries.append(entry)
+        elif sub["type"] == "repo":
+            for ev_type in sub["events"]:
+                url = self._build_repo_api_url(sub["repo"], ev_type, per_page=self.max_entries or 10)
+                items = await self._rest_api_get(url)
+                if items:
+                    for item in items[: self.max_entries or 10]:
+                        entry = self._build_repo_entry_dict(item, ev_type)
+                        if entry:
+                            entries.append(entry)
+        else:
+            items = await self._fetch_project_items(sub["org"], sub["number"], first=self.max_entries or 10)
+            if items:
+                for item in items[: self.max_entries or 10]:
+                    entry = self._build_project_entry_dict(item, sub["org"], sub["number"])
+                    if entry:
+                        entries.append(entry)
+        unique = {}
+        for e in entries:
+            unique[e["id"]] = e
+        result = list(unique.values())
+        if sub["type"] == "project":
+            result.sort(key=lambda x: x.get("raw_updated_at", ""), reverse=True)
+        else:
+            result.sort(key=lambda x: x.get("published_raw", x.get("published", "")), reverse=True)
+        return result[: self.max_entries] if self.max_entries > 0 else result
+
+    def _ensure_blank_between_sections(self, text: str) -> str:
+        """确保不同动态块（以特定emoji开头的行）之间至少有一个空行"""
+    # 定义段首emoji（根据你的格式化函数中使用的）
+        SECTION_EMOJIS = {'👤', '📢', '🐛', '📦', '🖥️'}
+    
+        lines = text.splitlines()
+        new_lines = []
+        first_section = True
+    
+        for line in lines:
+            stripped = line.strip()
+        # 判断当前行是否为段首emoji行
+            is_section_start = (
+                stripped and 
+                stripped[0] in SECTION_EMOJIS and
+            # 避免把列表项里的emoji（如➤ 🆕）误判
+                not stripped.startswith('➤')
+            )
+        
+        # 需要加空行：段首 且 上一行非空 且 不是第一行
+            if is_section_start:
+                if first_section:
+                    first_section = False
+                else:
+                    new_lines.append('\n————————————————\n')
+            new_lines.append(line)
+    
+        return '\n'.join(new_lines)
+    # ========================= 消息格式化（纯文本，不含表情和 at，只处理链接换行） =========================
+    def _format_user_entries(self, username: str, entries: List[Dict]) -> str:
+        lines = [f"👤 用户 {username} 的最新动态（{len(entries)} 条）：\n"]
         for i, e in enumerate(entries, 1):
             lines.append(f"  {i}. {e['title']}")
             if e.get("published"):
-                lines.append(f"     🕐 时间: {e['published']}")
+                lines.append(f"     🕐 时间：{e['published']}")
             if e.get("content"):
                 lines.append(f"     📝 {e['content']}")
+            for upd in e.get("updates", []):
+                lines.append(f"     ➤ {upd}")
+            author = e.get("author", "")
+            if author:
+                lines.append(f"     🙋 提出者：{author}")
             if e.get("link"):
-                lines.append(f"     🔗 {e['link']}")
+                lines.append(f"\n     🔗 {e['link']}")
             lines.append("")
         return "\n".join(lines)
 
-    @staticmethod
-    def _format_repo_entries(repo: str, event_types: List[str], entries: List[Dict]) -> str:
-        icon_map = {"issues": "🐛", "commits": "📝", "releases": "📦"}
+    def _format_repo_entries(self, repo: str, event_types: List[str], entries: List[Dict]) -> str:
+        icon_map = {"issues": "🐛", "commits": "🖥️", "releases": "📦"}
         icons = " ".join([icon_map.get(et, "🔔") for et in event_types])
-        lines = [f"{icons} 仓库 {repo} 的新动态（{len(entries)} 条）：\n"]
+        lines = [f"{icons} 仓库 {repo} 的最新动态（{len(entries)} 条）：\n"]
         for i, e in enumerate(entries, 1):
             lines.append(f"  {i}. {e['title']}")
             if e.get("published"):
-                lines.append(f"     🕐 时间: {e['published']}")
+                lines.append(f"     🕐 时间：{e['published']}")
             if e.get("content"):
-                lines.append(f"     📝 {e['content']}")
-            if e.get("author"):
-                lines.append(f"     🙋 提出者: @{e['author']}")
+                lines.append(f"     📝 详情：{e['content']}")
+            for upd in e.get("updates", []):
+                lines.append(f"     ➤ {upd}")
+            author = e.get("author", "")
+            if author:
+                lines.append(f"     🙋 提出者：{author}")
+            if e.get("assignees"):
+                ass_str = ", ".join(e["assignees"])
+                lines.append(f"     🔔 指派给：{ass_str}")
             if e.get("link"):
-                lines.append(f"     🔗 {e['link']}")
+                lines.append(f"\n     🔗 {e['link']}")
             lines.append("")
         return "\n".join(lines)
 
-    @staticmethod
-    def _format_project_entries(project_id: str, entries: List[Dict]) -> str:
-        lines = [f"📢 组织项目 {project_id} 有 {len(entries)} 个新动态：\n"]
+    def _format_project_entries(self, project_id: str, entries: List[Dict]) -> str:
+        lines = [f"📢 组织项目 {project_id} 的最新动态（{len(entries)} 条）：\n"]
         for i, e in enumerate(entries, 1):
             lines.append(f"  {i}. {e['title']}")
             if e.get("published"):
-                lines.append(f"     🕐 时间: {e['published']}")
-            if e.get("content"):
-                lines.append(f"     📝 {e['content']}")
+                lines.append(f"     🕐 时间：{e['published']}")
+            for upd in e.get("updates", []):
+                lines.append(f"     ➤ {upd}")
+            author = e.get("author", "")
+            if author:
+                lines.append(f"     🙋 提出者：{author}")
+            if e.get("assignees"):
+                ass_str = ", ".join(e["assignees"])
+                lines.append(f"     🔔 指派给：{ass_str}")
             if e.get("link"):
-                lines.append(f"     🔗 {e['link']}")
+                lines.append(f"\n     🔗 {e['link']}")
             lines.append("")
         return "\n".join(lines)
 
@@ -755,17 +1056,14 @@ class GitHubDynamicsPlugin(Star):
             return
         session = get_session_id(event)
 
-        # 解析 target
         sub = None
         display = ""
 
-        # 项目格式：org/number
         if RE_PROJECT_ITEM.match(target):
             match = RE_PROJECT_ITEM.match(target)
             org, num = match.group(1), int(match.group(2))
             sub = {"type": "project", "org": org, "number": num}
             display = f"项目 {org}/{num}"
-        # 仓库格式：owner/repo 或 owner/repo:issues,commits,releases
         elif "/" in target:
             repo_part = target
             events_part = "commits"
@@ -784,21 +1082,15 @@ class GitHubDynamicsPlugin(Star):
                     return
             if not any(events.values()):
                 events["commits"] = True
-            sub = {
-                "type": "repo",
-                "repo": repo_part,
-                "events": [e for e, enabled in events.items() if enabled]
-            }
+            sub = {"type": "repo", "repo": repo_part, "events": [e for e, enabled in events.items() if enabled]}
             display = f"仓库 {repo_part} 的 {', '.join(sub['events'])}"
         else:
-            # 用户
             if not RE_USER.match(target):
                 yield event.plain_result("❌ 用户名格式不正确")
                 return
             sub = {"type": "user", "username": target}
             display = f"用户 {target}"
 
-        # 检查重复
         for existing in self.subscriptions.get(session, []):
             if existing == sub:
                 yield event.plain_result(f"⚠️ 当前会话已订阅 {display}")
@@ -868,63 +1160,27 @@ class GitHubDynamicsPlugin(Star):
         if not items:
             yield event.plain_result("当前会话没有任何订阅，请先使用 gh subscribe 添加订阅。")
             return
-        yield event.plain_result("🔄 正在检查并推送订阅动态...")
-        await self._do_push_for_session(session)
-        yield event.plain_result("✅ 推送完成（如有新动态已发送）")
+        yield event.plain_result("🔄 正在获取已订阅目标的最新动态...")
 
-    async def _do_push_for_session(self, session: str):
-        items = self.subscriptions.get(session, [])
-        messages = []
+        msg_list = []
         for sub in items:
-            try:
+            entries = await self._fetch_latest_entries_force(sub)
+            if entries:
                 if sub["type"] == "user":
-                    last_cursor = await self._get_cursor(session, sub)
-                    if not last_cursor or last_cursor == "__EMPTY__":
-                        continue
-                    new_entries, new_cursor = await self._fetch_new_user_entries(sub["username"], last_cursor)
-                    if new_entries:
-                        msg = self._format_user_entries(sub["username"], new_entries)
-                        if msg:
-                            messages.append(msg)
-                    if new_cursor and new_cursor != last_cursor:
-                        await self._set_cursor(session, sub, new_cursor)
+                    msg = self._format_user_entries(sub["username"], entries)
                 elif sub["type"] == "repo":
-                    all_entries = []
-                    for ev_type in sub["events"]:
-                        last_cursor = await self._get_cursor(session, sub, ev_type)
-                        if not last_cursor or last_cursor == "__EMPTY__":
-                            continue
-                        new_entries, new_cursor = await self._fetch_new_repo_entries(sub["repo"], ev_type, last_cursor)
-                        if new_entries:
-                            all_entries.extend(new_entries)
-                        if new_cursor and new_cursor != last_cursor:
-                            await self._set_cursor(session, sub, new_cursor, ev_type)
-                    if all_entries:
-                        unique = {e["id"]: e for e in all_entries}.values()
-                        limited = list(unique)[:self.max_entries] if self.max_entries > 0 else list(unique)
-                        msg = self._format_repo_entries(sub["repo"], sub["events"], limited)
-                        if msg:
-                            messages.append(msg)
+                    msg = self._format_repo_entries(sub["repo"], sub["events"], entries)
                 else:
-                    last_cursor = await self._get_cursor(session, sub)
-                    if not last_cursor or last_cursor == "__EMPTY__":
-                        continue
-                    new_entries, new_cursor = await self._fetch_new_project_entries(sub["org"], sub["number"], last_cursor)
-                    if new_entries:
-                        msg = self._format_project_entries(f"{sub['org']}/{sub['number']}", new_entries)
-                        if msg:
-                            messages.append(msg)
-                    if new_cursor and new_cursor != last_cursor:
-                        await self._set_cursor(session, sub, new_cursor)
-            except Exception as e:
-                logger.error(f"[GitHubDynamics] 推送会话 {session} 订阅 {sub} 失败: {e}")
-        if messages:
-            full_msg = "\n\n".join(messages)
-            chain = MessageChain().message(full_msg)
-            try:
-                await self.context.send_message(session, chain)
-            except Exception as e:
-                logger.error(f"[GitHubDynamics] 推送到 {session} 失败: {e}")
+                    msg = self._format_project_entries(f"{sub['org']}/{sub['number']}", entries)
+                if msg:
+                    msg_list.append(msg)
+
+        if msg_list:
+            full_msg = "\n\n".join(msg_list)
+            full_msg = self._ensure_blank_between_sections(full_msg) 
+            await self._send_message_with_mentions(session, full_msg)
+        else:
+            yield event.plain_result("✅ 所有订阅均无最新动态。")
 
     async def _cmd_check(self, event: AstrMessageEvent, target: str):
         if not is_user_allowed(self, event):
@@ -940,12 +1196,14 @@ class GitHubDynamicsPlugin(Star):
                 yield event.plain_result("❌ 无法获取项目数据，请检查组织名、项目编号及 token 权限")
                 return
             entries = []
-            for item in items[:self.max_entries or 10]:
+            for item in items[: self.max_entries or 10]:
                 entry = self._build_project_entry_dict(item, org, num)
                 if entry:
                     entries.append(entry)
             if entries:
-                yield event.plain_result(self._format_project_entries(f"{org}/{num}", entries))
+                entries.sort(key=lambda x: x.get("raw_updated_at", ""), reverse=True)
+                msg = self._format_project_entries(f"{org}/{num}", entries)
+                yield event.plain_result(msg)
             else:
                 yield event.plain_result(f"🔍 项目 {org}/{num} 暂无最近动态。")
             return
@@ -976,14 +1234,16 @@ class GitHubDynamicsPlugin(Star):
                 url = self._build_repo_api_url(repo_part, ev_type, per_page=self.max_entries or 10)
                 items = await self._rest_api_get(url)
                 if items:
-                    for item in items[:self.max_entries or 10]:
+                    for item in items[: self.max_entries or 10]:
                         entry = self._build_repo_entry_dict(item, ev_type)
                         if entry:
                             all_entries.append(entry)
             if all_entries:
                 unique = {e["id"]: e for e in all_entries}.values()
-                limited = list(unique)[:self.max_entries or 10]
-                yield event.plain_result(self._format_repo_entries(repo_part, enabled_events, limited))
+                limited = list(unique)[: self.max_entries or 10]
+                limited.sort(key=lambda x: x.get("published", ""), reverse=True)
+                msg = self._format_repo_entries(repo_part, enabled_events, limited)
+                yield event.plain_result(msg)
             else:
                 yield event.plain_result(f"🔍 仓库 {repo_part} 暂无最近的动态。")
             return
@@ -997,50 +1257,37 @@ class GitHubDynamicsPlugin(Star):
             yield event.plain_result(f"🔍 用户 {target} 暂无最近公开动态。")
             return
         entries = []
-        for ev in events[:self.max_entries or 10]:
+        for ev in events[: self.max_entries or 10]:
             entry = self._build_user_entry_dict(ev, target)
             if entry:
                 entries.append(entry)
         if entries:
-            yield event.plain_result(self._format_user_entries(target, entries))
+            entries.sort(key=lambda x: x.get("published", ""), reverse=True)
+            msg = self._format_user_entries(target, entries)
+            yield event.plain_result(msg)
         else:
             yield event.plain_result(f"🔍 用户 {target} 暂无最近动态。")
-
-    async def _cmd_here(self, event: AstrMessageEvent):
-        if not is_user_allowed(self, event):
-            yield event.plain_result("❌ 你没有权限使用此指令")
-            return
-        session = get_session_id(event)
-        items = self.subscriptions.get(session, [])
-        if items:
-            msg = f"📌 当前会话已绑定 {len(items)} 个订阅。\n"
-            for i, sub in enumerate(items, 1):
-                msg += f"{i}. {self._format_sub(sub)}\n"
-            msg += "\n💡 使用 gh subscribe 添加订阅，gh unsubscribe 取消订阅。"
-        else:
-            msg = f"📌 当前会话 ID：`{session}`\n尚未订阅任何目标。使用 `gh subscribe` 添加监听。"
-        yield event.plain_result(msg)
 
     async def _cmd_help(self, event: AstrMessageEvent):
         help_text = (
             "📦 GitHub Dynamics 插件 v0.0.1\n"
-            "命令格式：gh <子命令> [参数]\n\n"
+            "命令格式：gh 子命令 [参数]\n\n"
             "可用子命令：\n"
-            "  subscribe <目标>         - 订阅目标\n"
-            "  unsubscribe [序号]       - 取消订阅\n"
-            "  list                     - 列出当前会话的订阅\n"
-            "  pushnow                  - 立即推送所有订阅的最新动态\n"
-            "  check <目标>             - 查询目标的最新动态（不订阅）\n"
-            "  here                     - 显示当前会话信息\n"
-            "  help                     - 显示本帮助\n\n"
+            "👉subscribe 目标    - 订阅目标\n"
+            "👉unsubscribe 序号    - 取消订阅\n"
+            "👉list    - 列出当前会话的订阅\n"
+            "👉pushnow    - 在当前会话立即推送所有订阅的最新动态\n"
+            "👉check 目标    - 查询目标的最新动态（不订阅）\n"
+            "👉help    - 显示本帮助\n\n"
             "目标格式：\n"
-            "  用户：   octocat\n"
-            "  仓库：   octocat/Hello-World[:events]   events可选 issues,commits,releases，默认 commits，多选用逗号分隔\n"
-            "  项目：   octocat/123 (组织名/项目编号)\n\n"
+            "- 用户：CecilyGao\n"
+            "- 仓库：octocat/Hello-World[:events]   (events可选 issues,commits,releases，默认 commits，多选用逗号分隔)\n"
+            "- 项目：octocat/123 (即组织名/项目编号)\n\n"
             "示例：\n"
-            "  gh subscribe octocat\n"
-            "  gh subscribe octocat/Hello-World:issues,commits\n"
-            "  gh subscribe facebook/react:releases\n"
+            "- gh check CecilyGao\n"
+            "- gh subscribe CecilyGao/astrbot_plugin_github_dynamics:issues,commits\n"
+            "- gh subscribe facebook/react:releases\n"
+            "- gh subscribe AstrBotDevs/1\n"
             "数据来源：GitHub API"
         )
         yield event.plain_result(help_text)
@@ -1054,7 +1301,6 @@ class GitHubDynamicsPlugin(Star):
         else:
             return f"项目 {sub['org']}/{sub['number']}"
 
-    # ========================= 主命令入口 =========================
     @filter.command("gh")
     async def gh(self, event: AstrMessageEvent):
         full_text = event.message_str.strip()
@@ -1089,9 +1335,6 @@ class GitHubDynamicsPlugin(Star):
                 return
             target = " ".join(args)
             async for result in self._cmd_check(event, target):
-                yield result
-        elif subcmd in ["here", "session"]:
-            async for result in self._cmd_here(event):
                 yield result
         elif subcmd in ["help", "h"]:
             async for result in self._cmd_help(event):
