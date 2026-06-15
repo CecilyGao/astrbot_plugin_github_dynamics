@@ -131,6 +131,6 @@ MIT License © 2026 CecilyGao
 
 - 本插件融合了astrbot_plugin_private_github与astrbot_plugin_listen_github的设计，感谢原插件作者[aliveriver](https://github.com/aliveriver)与协作者[Kingcq](https://github.com/kingcxp)的贡献！
 
-- [Astrbot Team](https://github.com/AstrBotDevs/AstrBot)
-
 - 感谢[reminder插件](https://github.com/Foolllll-J/astrbot_plugin_reminder) 的设计思路与架构启发，为本插件的多会话订阅管理提供了重要参考。
+
+- [Astrbot Team](https://github.com/AstrBotDevs/AstrBot)
