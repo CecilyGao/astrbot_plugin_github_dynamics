@@ -1,7 +1,7 @@
 name: astrbot_plugin_github_dynamics
 display_name: GitHub 动态推送插件
 desc: 通过 GitHub API 定时获取github用户、仓库动态并推送到聊天会话，支持每个会话独立订阅
-version: v0.0.1
+version: v0.1.0
 author: CecilyGao
 repo: https://github.com/CecilyGao/astrbot_plugin_github_dynamics
 astrbot_version: ">=4.9.2"
